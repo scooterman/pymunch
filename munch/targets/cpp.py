@@ -9,6 +9,8 @@ class CppContext(object):
         
         self.on_ctype_register = lambda ctype: ctype
 
+        self.MUNCH_ANY_TYPE = cpp_type('!@_MUNCH_YAMMY')
+
     def register_ctype(self, ctype):
         template_hash = tuple(map(lambda ctype: ctype.hash, ctype.templates))
         
@@ -23,12 +25,13 @@ class CppContext(object):
         if not ctype.variable_get: ctype.variable_get = lambda context,  ctype: None
         if not ctype.variable_set: ctype.variable_set = lambda context,  ctype: None
         if not ctype.type_conversion: ctype.type_conversion = lambda context,  ctype: None
-        
+        if not ctype.variable_dereference: ctype.variable_dereference = lambda context,  ctype: None
+
         return ctype
 
     def get_registered_ctype(self, ctype):
         if ctype.name not in self.types:
-            return None
+            return self.MUNCH_ANY_TYPE
     
         template_hash = tuple(map(lambda ctype: ctype.hash, ctype.templates))
         bitflags = self.types[ctype.name][template_hash]
@@ -57,12 +60,26 @@ class CppContext(object):
     def add_type_check(self, ctype, check):
         self.get_ctype(ctype).type_check = check
 
+    def apply_variable_dereference(self, variable):
+        assert type(variable) == cpp_variable
+
+        found = self.get_registered_ctype(variable.ctype)
+        
+        if not found:
+            if self.MUNCH_ANY_TYPE.variable_dereference:
+                return self.MUNCH_ANY_TYPE.variable_dereference(variable, self.MUNCH_ANY_TYPE)
+            return 'assert(false && "failed to find a suitable dereference for variable [%s]")' % variable
+       
+        return found.variable_dereference(variable, found)
+
     def apply_initializer(self, variable):
         assert type(variable) == cpp_variable
 
         found = self.get_registered_ctype(variable.ctype)
         
         if not found:
+            if self.MUNCH_ANY_TYPE.initializer:
+                return self.MUNCH_ANY_TYPE.initializer(variable, self.MUNCH_ANY_TYPE)
             return 'assert(false && "failed to find a suitable initializer for variable [%s]")' % variable
        
         return found.initializer(variable, found)
@@ -72,6 +89,8 @@ class CppContext(object):
         found = self.get_registered_ctype(variable)
         
         if not found:
+            if self.MUNCH_ANY_TYPE.variable_set:
+                return self.MUNCH_ANY_TYPE.variable_set(variable, self.MUNCH_ANY_TYPE)
             return 'assert(false && "failed to find a suitable conversion cpp->target for variable [%s]")' % variable
         
         return found.variable_set(variable, found)
@@ -84,6 +103,8 @@ class CppContext(object):
         found = self.get_registered_ctype(variable.ctype)
         
         if not found:
+            if self.MUNCH_ANY_TYPE.variable_get:
+                return self.MUNCH_ANY_TYPE.variable_get(variable, self.MUNCH_ANY_TYPE)
             return 'assert(false && "failed to find a suitable target->cpp type [%s]")' % variable
         
         return found.variable_get(variable, found)
@@ -93,19 +114,22 @@ class CppContext(object):
         found = self.get_registered_ctype(variable.ctype)
         
         if not found:
+            if self.MUNCH_ANY_TYPE.type_check:
+                return self.MUNCH_ANY_TYPE.type_check(variable, self.MUNCH_ANY_TYPE)
             return 'assert(false && "error fetching type check fortype [%s]")' % variable.name
         
         return found.type_check(variable, found)
 
-    def translate_method(self, json_method):
-        method = self.method_translation(self, json_method)
-        self.translated.append(method)
+    def translate_method(self, method, context = None, append = False):
+        method = self.method_translation(self, context, method)
+        if append: self.translated.append(method)
 
         return method
 
-    def translate_class(self, in_cls):        
-        cls = self.class_translation(in_cls)
-        self.translated.append(cls)
+    def translate_class(self, in_cls, append = True):        
+        cls = self.class_translation(self, in_cls)
+        
+        if append: self.translated.append(cls)
 
         return cls
 
@@ -114,16 +138,29 @@ class CppContext(object):
 
         for item in data:
             if type(item) == cpp_method:
-                self.translate_method(item)
+                print 'processing cpp method: %r' % item
+                self.translate_method(item, None, True)
             elif type(item) == cpp_class:
+                print 'processing cpp class: %r' % item
                 self.translate_class(item)
+
+class cpp_dereference(object):
+    def __init__(self, expr):
+        self.expr = expr
+
+    def __repr__(self):
+        return '< dereference >'
+
+    def __str__(self):
+        assert(self.expr)
+        return '*' + self.expr
 
 class cpp_and:
     def __init__(self, expr = []):
-        self.exprs = expr
+        self.exprs = list(expr)
 
     def __repr__(self):
-        return '<and expression: "%s" >' % self.__str__()
+        return '< and expression >'
 
     def __str__(self):
         assert(self.exprs)
@@ -131,31 +168,38 @@ class cpp_and:
 
 class cpp_or:
     def __init__(self, expr = []):
-        self.exprs = expr
+        self.exprs = list(expr)
     def __repr__(self):
-        return '<or expression: "%s" >' % self.__str__()
+        return '< or expression >'
 
     def __str__(self):
         assert(self.exprs)
         return ' || '.join(self.exprs)
 
 class cpp_if:
+    ident = (2 , 'spaces')
+
     def __init__(self, expr = [], body = []):
-        self.exprs = expr
-        self.body = body
+        self.exprs = list(expr)
+        self.body = list(body)
+        self.cpp_else = None
+
     def __repr__(self):
-        return '<if expression: "%s" >' % self.__str__()
+        return '< if expression >'
 
     def __str__(self):
         assert(self.exprs)
-        return 'if (%s) { %s }' % (' '.join(self.exprs), '\n'.join(self.body))
+        return 'if (%s) { \n %s } %s' % \
+            ('\n'.join(map(str, self.exprs)), 
+             ''.join(map(lambda body: str(body) + ';\n', self.body)),
+             '' if not self.cpp_else else ' else %s ' % str(self.cpp_else))
 
 class cpp_return(object):
     def __init__(self, expr):
         self.expr = expr
 
     def __repr__(self):
-        return '<return expression: "%s" >' % self.__str__()
+        return '< return expression  >'
 
     def __str__(self):
         assert(self.expr != None)
@@ -170,11 +214,11 @@ case {expr}:
 '''
     def __init__(self, expr = None, body = []):
         self.expr = expr
-        self.body = body
+        self.body = list(body)
         self.parent = None
 
     def __repr__(self):
-        return '<case expression: "%s" >' % self.__str__()
+        return '< case expression >'
 
     def __str__(self):
         assert(self.exprs)
@@ -188,11 +232,11 @@ default:
     break;
 '''
     def __init__(self, body = []):
-        self.body = body
+        self.body = list(body)
         self.parent = None
 
     def __repr__(self):
-        return '<case default expression: "%s" >' % self.__str__()
+        return '< case default expression >'
 
     def __str__(self):
         return cpp_case_default.case_str.format(body='\n'.join(self.body))
@@ -207,12 +251,12 @@ switch({switch_expr}) {
 '''
     def __init__(self, switch_expr, case_exprs = [], default = ''):
         self.switch_expr = switch_expr
-        self.case_exprs = case_exprs
-        self.default = default
+        self.case_exprs = list(case_exprs)
+        self.default = str(default)
         self.parent = None
 
     def __repr__(self):
-        return '<switch expression: "%s" >' % self.__str__()
+        return '< switch expression >'
 
     def __str__(self):
         assert(self.switch_expr)
@@ -221,20 +265,15 @@ switch({switch_expr}) {
             default=self.default)
 
 class cpp_block(object):
-    block_str=\
-'''{
-  %s
-}
-'''
     def __init__(self, exprs = []):
-        self.exprs = exprs
+        self.exprs = list(exprs)
 
     def __repr__(self):
-        return '<block expression: "%s" >' % self.__str__()
+        return '< block expression of size %d >' % len(self.exprs)
 
     def __str__(self):
         assert(self.exprs)
-        return cpp_block.block_str % self.expr   
+        return '{%s}' % self.expr   
 
 class cpp_variable(object):
     def __init__(self, name, ctype, expr = None):
@@ -244,13 +283,29 @@ class cpp_variable(object):
         self.parent = None
 
     def __repr__(self):
-        return '<cpp type: %s >' % self.__str__()
+        return '<cpp type: %s >' % self.name
 
     def __str__(self):
         assert(self.ctype)
         assert(self.name)
         
         return ('%s %s %s' % (self.ctype,  self.name, '' if self.expr == None else '= %s' % str(self.expr))).strip()
+
+class cpp_variable_array(object):
+    def __init__(self, name, ctype, expr = []):
+        self.name = name
+        self.expr = list(expr)
+        self.ctype = ctype
+        self.parent = None
+
+    def __repr__(self):
+        return '< cpp variable array: %s[%d] >' % (self.name, len(self.expr))
+
+    def __str__(self):
+        assert(self.ctype)
+        assert(self.name)
+
+        return ('%s %s %s' % (self.ctype,  self.name, '' if self.expr == None else '[%d] = { %s }' % (len(self.expr), ','.join(map(str, self.expr))))).strip()
 
 mark = object()
 def get_id_tuple(f, *args, **kwargs):
@@ -295,20 +350,24 @@ def memoize(f):
     return memoized
 
 @memoize
-class cpp_type(object):
+def cpp_type(*args, **kwargs):
+    return cpp_qual_type(*args, **kwargs)
+
+class cpp_qual_type(object):
     def __init__(self, name, pointer=False, static=False, const=False, reference=False, templates=[]):
         self.name = name
         self.pointer = pointer
         self.static = static
         self.const = const
         self.reference = reference
-        self.templates = templates
+        self.templates = list(templates)
         self.bitflags = 0
         self.initializer = None
         self.type_check = None
         self.variable_get = None
         self.variable_set = None
         self.type_conversion = None
+        self.variable_dereference = None
         self.update_bitflags()
 
     def __hash__(self):        
@@ -339,7 +398,7 @@ class cpp_type(object):
         result = '%s %s %s%s%s%s' %\
             ('static' if self.static else '',
              'const' if self.const else '',
-             self.name,
+             str(self.name),
              '<%s>' % (','.join(map(str, self.templates))) if self.templates else '',
              '*' if self.pointer else '',
              '&' if self.reference else '')
@@ -349,14 +408,14 @@ class cpp_type(object):
 class cpp_method_call(object):
     def __init__(self, expr, params=[]):
         self.expr = expr
-        self.params = params
+        self.params = list(params)
         self.parent = None
 
     def __repr__(self):
-        return '<block expression: "%s" >' % self.__str__()
+        return '<block expression: "%s" >' % self.expr
 
     def __str__(self):
-        assert(self.params)
+        assert(self.expr)
         return '%s(%s)' % (self.expr,  ','.join(map(str, self.params)))
 
 class cpp_method(object):
@@ -365,15 +424,14 @@ class cpp_method(object):
 {static} {return_type} {func_name} ({param_list}) {{
     {body}
     {return_value}
-}}
-'''
+}}'''
     def __init__(self, name, static = False,
                  returns = cpp_type('void'), params=[], return_value=None,
                  is_constructor = False):
         self.name = name
         self.static = static
         self.returns = returns
-        self.parameters = params
+        self.parameters = list(params)
         self.body = []
         self.return_value = return_value
         self.context = {}
@@ -381,7 +439,7 @@ class cpp_method(object):
         self.parent = None
 
     def __repr__(self):
-        return '<cpp method: "%s" >' % self.__str__()
+        return '< cpp method: "%s" >' % self.name
 
     def __str__(self):
         assert(self.name)
@@ -392,12 +450,34 @@ class cpp_method(object):
                     func_name=self.name,
                     param_list=','.join(map(str, self.parameters)),
                     body='\n'.join([line + ';' for line in map(str,  self.body)]),
-                    return_value='%s;' % str(self.return_value))
+                    return_value= '' if not self.return_value else str(self.return_value) + ';')
 
 class cpp_class(object):
+    cpp_class_str=\
+'''
+class {ClassName} {Bases}
+{{
+{PublicDeclarations}
+{ProtectedDeclarations}
+{PrivateDeclarations}  
+}};'''
+
     def __init__(self,  name, public=[], protected=[], private=[], bases=[]):
         self.name = name
-        self.public = public
-        self.protected = protected
-        self.private = private
-        self.bases = bases
+        self.public = list(public)
+        self.protected = list(protected)
+        self.private = list(private)
+        self.bases = list(bases)
+
+    def __repr__(self):
+        return '< cpp class: "%s" >' % self.name
+
+    def __str__(self):
+        assert(self.name)
+               
+        return cpp_class.cpp_class_str.format(ClassName = self.name,
+            Bases = '' if not self.bases else ':' + ','.join(map(str, self.bases)),
+            PublicDeclarations = '' if not self.public else 'public:\n' + '\n'.join(map(lambda item: str(item) + ';', self.public)), 
+            ProtectedDeclarations = '' if not self.protected else 'protected:\n' + ';\n'.join(map(str, self.protected)),
+            PrivateDeclarations = '' if not self.private else 'private:\n' + ';\n'.join(map(str, self.private)),
+        )
