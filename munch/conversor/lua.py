@@ -40,11 +40,14 @@ def process_functions(cls):
 
             for i, function in enumerate(overloads[func]):
                 function.name = '%s_overload_%d' % (function.name, overload_count)
+                function.is_overload = False
                 overload_count += 1
 
                 #resolving functions that can be deduced by the count of it's arguments    
                 same_qnt = False
+                
                 for other_f in  overloads[func]:
+
                     if other_f == function: continue
 
                     if len(function.parameters) == len(other_f.parameters):
@@ -81,6 +84,8 @@ def process_functions(cls):
     final_public = filter(lambda item: type(item) != cpp.cpp_method, cls.public)
     cls.public = final_public + final_functions
 
+    print repr(cls), cls.public
+
 def lua_before_init(context, data):
     classes = filter(lambda item: type(item) == cpp.cpp_class, data)
     functions = filter(lambda item: type(item) == cpp.cpp_method, data)
@@ -89,6 +94,7 @@ def lua_before_init(context, data):
     del data[:]
 
     for item in classes:
+        item.identifier_name = item.qualname.replace('::', '_')
         process_functions(item)
 
     fake_cls = cpp.cpp_class('Fake')
@@ -103,11 +109,11 @@ def lua_method_translation(context, func_ctx, function):
             static=True, returns=cpp.cpp_type('int'),
             params=[cpp.cpp_variable('L', cpp.cpp_type('lua_State', pointer=True))])
 
-    if function.parent:
-        method.parameters.append(cpp.cpp_variable('lua_self', cpp.cpp_type(function.parent.name, pointer=True)))
+    if function.parent and function.is_virtual:
+        method.parameters.append(cpp.cpp_variable('lua_self', cpp.cpp_type(function.parent.qualname, pointer=True)))
 
     if function.is_constructor:
-        method.function_name = 'TODO#CONSTRUCTOR'
+        method.name = 'lua_munch_' + function.parent.name + '_constructor'
 
     #now we embed the default object with a very specific format that will be useful later
     method.initialization = [] # will contain initialization steps
@@ -117,7 +123,8 @@ def lua_method_translation(context, func_ctx, function):
     method.lua_return = [] # will contain the steps to push a value back to lua
 
     method.return_value = cpp.cpp_return(0)
-    
+
+    print repr(function)
     #then, we have two differences, when the method is overloaded or not
     if function.is_overload:
         stack_init = 1 if not function.is_constructor else 0
@@ -128,7 +135,12 @@ def lua_method_translation(context, func_ctx, function):
             switch = cpp.cpp_switch('lua_gettop(L)')
             
             for by_arg_count in acount:
-                switch.case_exprs.append(cpp.cpp_method_call(by_arg_count['name']))
+                case = cpp.cpp_case()
+                case.expr = len(by_arg_count.parameters)
+                case.body.append(cpp.cpp_return(cpp.cpp_method_call(by_arg_count.name, params=['L', 'lua_self'])))
+
+                switch.exprs.append(case)
+
                 other_method = context.translate_method(by_arg_count)
 
                 for item in other_method.execution:
@@ -152,6 +164,9 @@ def lua_method_translation(context, func_ctx, function):
 
                     cand.exprs.append('lua_type(L, %d) == %s'
                         % (stack_init + i, cparam.lua_type))
+
+                if not cand.exprs:
+                    raise Exception("Error processing items by lua type: %r" % (by_lua_type))
 
                 by_lua_type.is_overload = False
 
@@ -184,7 +199,7 @@ def lua_method_translation(context, func_ctx, function):
             lua_method = deepcopy(method)
             lua_method.parameters.pop(-1)
 
-            lua_method.body = []
+            lua_method.exprs = []
             lua_method.return_value = cpp.cpp_return(cpp.cpp_method_call(method.name, params=['L', 'nullptr']))
             
             func_ctx.public.append(lua_method)
@@ -199,7 +214,7 @@ def lua_method_translation(context, func_ctx, function):
             method.initialization.append(context.apply_initializer(parameter))
         
         #this additional step will ensure that the amount of parameters is correct
-        method.validation.append('assert(lua_gettop(L) == %d)' % (len(function.parameters) + 0 if function.is_constructor else 1))
+        method.validation.append('assert(lua_gettop(L) == %d)' % (len(function.parameters) + (0 if function.is_constructor else 1)))
 
         #then we add type checking
         for parameter in function.parameters:
@@ -207,10 +222,13 @@ def lua_method_translation(context, func_ctx, function):
 
         #then we get the variables from LUA
         if function.parent:
-            cif = cpp.cpp_if(['lua_self != nullptr'])
-            cif.body.append('lua_self = lua_munch_%s::get(L)' % (function.parent.name))
+            if function.is_virtual:
+                cif = cpp.cpp_if(['lua_self != nullptr'])
+                cif.body.append('lua_self = lua_munch_%s::get(L)' % (function.parent.identifier_name))
 
-            method.recover.append(cif)
+                method.recover.append(cif)
+            else:
+                method.initialization.append('{0}* lua_self = lua_munch_{1}::get(L)'.format(function.parent.qualname, function.parent.identifier_name))
 
         for parameter in function.parameters:
             method.recover.append(context.apply_variable_get(parameter))
@@ -223,26 +241,37 @@ def lua_method_translation(context, func_ctx, function):
         method.execution.append(cpp.cpp_method_call(function.name if not function.parent else 'lua_self->' + function.name, applied_parameters))
 
         if function.returns != cpp.cpp_type('void'):
-            method.lua_return.append(context.apply_variable_set(cpp.cpp_variable('return', function.returns)))
+            #if the function is not void, we recover the method execution
+            method_execution = method.execution[0]
+
+            #create a variable assignment
+            assign = cpp.cpp_assignment(cpp.cpp_variable('lua_return', function.returns), method_execution)
+
+            #put id back to the execution
+            method.execution[0] = assign
+
+            #push the value to lua
+            method.lua_return.append(context.apply_variable_set(assign.expr_a))
+
+            #and then change the call function to 1 so LUA knows it has one value to unpack
             method.return_value = cpp.cpp_return(1)
     
     #now convert to something the cpp translator is waiting, i.e. the body
-    method.body += method.initialization + method.validation + method.recover + method.execution + method.lua_return
+    method.exprs += method.initialization + method.validation + method.recover + method.execution + method.lua_return
 
     return method
 
 def lua_class_translation(context, class_def):
-    lua_cls = cpp.cpp_class('lua_munch_' + class_def.name)
+    lua_cls = cpp.cpp_class('lua_munch_' + class_def.identifier_name)
 
-    luaReg = cpp.cpp_variable_array('lua_reg_' + class_def.name, 
+    luaReg = cpp.cpp_variable_array('lua_reg_' + class_def.identifier_name, 
                                 cpp.cpp_type('luaL_Reg', static=True))
 
     for item in class_def.public:
         generated_method = context.translate_method(item, lua_cls)
-
         lua_cls.public.append(generated_method)
 
-        if type(item) == cpp.cpp_method:
+        if type(item) == cpp.cpp_method and not item.is_constructor:
             luaReg.expr.append('{ "%s" , lua_munch_%s::lua_munch_%s }' % (item.name, class_def.name, item.name)) 
 
     #the base methods are shims that only retrieve the self and pass it down to the
@@ -258,13 +287,14 @@ def lua_class_translation(context, class_def):
 
             if item.parent:
                 item.parameters.append(cpp.cpp_variable('lua_self', cpp.cpp_type(item.parent.name, pointer=True)))
-                method.body.append('%s* lua_self = lua_munch_%s::get(L)' % (class_def.name, class_def.name))
+                method.exprs.append('%s* lua_self = lua_munch_%s::get(L)' % (class_def.qualname, class_def.identifier_name))
 
-            method.body.append(cpp.cpp_return(cpp.cpp_method_call('lua_munch_%s::lua_munch_%s' % (item.parent.name, item.name), params=['L', 'lua_self'])))
+            method.exprs.append(cpp.cpp_return(cpp.cpp_method_call('lua_munch_%s::lua_munch_%s' % (item.parent.name, item.name), params=['L', 'lua_self'])))
 
             lua_cls.public.append(method)
 
-            luaReg.expr.append('{ "%s" , lua_munch_%s::lua_munch_%s }' % (item.name, class_def.name, item.name))             
+            if not item.is_constructor:
+                luaReg.expr.append('{ "%s" , lua_munch_%s::lua_munch_%s }' % (item.name, class_def.name, item.name))             
 
     luaReg.expr.append('{ 0, 0 }')
 
@@ -283,7 +313,7 @@ def initialize_primitive(ctype, lua_type, lua_get, lua_set):
         return '%s = %s(L, %d)' % (variable.name, lua_get, variable.index)
 
     def variable_set(variable, ctype):
-        return '%s(L, %s)' %(variable.name)
+        return '%s(L, %s)' %(lua_set, variable.name)
 
     def variable_dereference(variable, ctype):
         return variable.name
@@ -301,7 +331,9 @@ def anytype_type_check(variable, type):
     return 'assert(lua_type(L,%d) == LUA_TUSERDATA)' % variable.index
 
 def anytype_initializer(variable, ctype):
-    return cpp.cpp_variable(variable.name, cpp.cpp_type(variable.ctype, pointer=True))
+    #the initialized variable shouldn't carry refs and other stuff, so we bake a new one here
+    new_ctype = cpp.cpp_type(variable.ctype.name, pointer=variable.ctype.pointer)    
+    return cpp.cpp_variable(variable.name, cpp.cpp_type(new_ctype, pointer=True, reference=False))
 
 def anytype_variable_get(variable, ctype):
     return '%s = lua_munch_%s::get(L)' % (variable.name, variable.ctype.name)

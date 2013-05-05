@@ -86,7 +86,7 @@ class CppContext(object):
         
     def apply_variable_set(self, variable):
         assert type(variable) == cpp_variable
-        found = self.get_registered_ctype(variable)
+        found = self.get_registered_ctype(variable.ctype)
         
         if not found:
             if self.MUNCH_ANY_TYPE.variable_set:
@@ -144,6 +144,20 @@ class CppContext(object):
                 print 'processing cpp class: %r' % item
                 self.translate_class(item)
 
+class cpp_assignment(object):
+    def __init__(self, expr_a, expr_b):
+        self.expr_a = expr_a
+        self.expr_b = expr_b
+
+    def __repr__(self):
+        return '< assignment >'
+
+    def __str__(self):
+        assert(self.expr_a)
+        assert(self.expr_b)
+
+        return str(self.expr_a) + ' = ' + str(self.expr_b)
+
 class cpp_dereference(object):
     def __init__(self, expr):
         self.expr = expr
@@ -176,11 +190,21 @@ class cpp_or:
         assert(self.exprs)
         return ' || '.join(self.exprs)
 
-class cpp_if:
-    ident = (2 , 'spaces')
+class cpp_block(object):
+    def __init__(self, exprs = []):
+        self.exprs = list(exprs)
 
+    def __repr__(self):
+        return '< block expression of size %d >' % len(self.exprs)
+
+    def __str__(self):
+        assert(self.exprs)
+        return '{%s}' % self.expr   
+
+
+class cpp_if (cpp_block):
     def __init__(self, expr = [], body = []):
-        self.exprs = list(expr)
+        cpp_block.__init__(self)
         self.body = list(body)
         self.cpp_else = None
 
@@ -210,7 +234,7 @@ class cpp_case(object):
 '''
 case {expr}:
     {body}
-    break;
+    {Break}
 '''
     def __init__(self, expr = None, body = []):
         self.expr = expr
@@ -221,8 +245,10 @@ case {expr}:
         return '< case expression >'
 
     def __str__(self):
-        assert(self.exprs)
-        return cpp_case.case_str.format(expr=self.expr,body=';\n'.join(map(str, self.body)))
+        assert(self.expr != None)
+        return cpp_case.case_str.format(expr=str(self.expr),
+                            body='\n'.join(map(lambda ast: str(ast) + ';', self.body)),
+                            Break='break;' if self.body and type(self.body[-1]) != cpp_return else '').strip()
 
 class cpp_case_default(object):
     default_str=\
@@ -241,17 +267,17 @@ default:
     def __str__(self):
         return cpp_case_default.case_str.format(body='\n'.join(self.body))
 
-class cpp_switch:
+class cpp_switch (cpp_block):
     switch_str=\
 '''
-switch({switch_expr}) {
+switch({switch_expr}) {{
 {case_exprs}
 {default}
-}
+}}
 '''
     def __init__(self, switch_expr, case_exprs = [], default = ''):
         self.switch_expr = switch_expr
-        self.case_exprs = list(case_exprs)
+        self.exprs = list(case_exprs)
         self.default = str(default)
         self.parent = None
 
@@ -260,20 +286,10 @@ switch({switch_expr}) {
 
     def __str__(self):
         assert(self.switch_expr)
-        return cpp_switch.switch_str.format(switch_expr=self.switch_expr, 
-            case_exprs='\n'.join(self.case_exprs),
+        return cpp_switch.switch_str.format(switch_expr=str(self.switch_expr), 
+            case_exprs='\n'.join(map(str, self.exprs)),
             default=self.default)
 
-class cpp_block(object):
-    def __init__(self, exprs = []):
-        self.exprs = list(exprs)
-
-    def __repr__(self):
-        return '< block expression of size %d >' % len(self.exprs)
-
-    def __str__(self):
-        assert(self.exprs)
-        return '{%s}' % self.expr   
 
 class cpp_variable(object):
     def __init__(self, name, ctype, expr = None):
@@ -283,7 +299,7 @@ class cpp_variable(object):
         self.parent = None
 
     def __repr__(self):
-        return '<cpp type: %s >' % self.name
+        return '<cpp variable: "%s %s" >' % (self.ctype, self.name)
 
     def __str__(self):
         assert(self.ctype)
@@ -412,13 +428,13 @@ class cpp_method_call(object):
         self.parent = None
 
     def __repr__(self):
-        return '<block expression: "%s" >' % self.expr
+        return '<method call: "%s" >' % self.expr
 
     def __str__(self):
         assert(self.expr)
-        return '%s(%s)' % (self.expr,  ','.join(map(str, self.params)))
+        return '%s(%s)' % (str(self.expr),  ','.join(map(str, self.params)))
 
-class cpp_method(object):
+class cpp_method(cpp_block):
     body_str =\
 '''
 {static} {return_type} {func_name} ({param_list}) {{
@@ -427,16 +443,17 @@ class cpp_method(object):
 }}'''
     def __init__(self, name, static = False,
                  returns = cpp_type('void'), params=[], return_value=None,
-                 is_constructor = False):
+                 is_constructor = False, is_virtual = False):
+        cpp_block.__init__(self)
         self.name = name
         self.static = static
         self.returns = returns
         self.parameters = list(params)
-        self.body = []
         self.return_value = return_value
         self.context = {}
         self.is_constructor = is_constructor
         self.parent = None
+        self.is_virtual = is_virtual
 
     def __repr__(self):
         return '< cpp method: "%s" >' % self.name
@@ -449,7 +466,7 @@ class cpp_method(object):
                     static = 'static' if self.static else '', 
                     func_name=self.name,
                     param_list=','.join(map(str, self.parameters)),
-                    body='\n'.join([line + ';' for line in map(str,  self.body)]),
+                    body='\n'.join(map(lambda expr: str(expr) + ';' if not isinstance(expr, cpp_block) else '',  self.exprs)),
                     return_value= '' if not self.return_value else str(self.return_value) + ';')
 
 class cpp_class(object):
@@ -474,10 +491,9 @@ class {ClassName} {Bases}
 
     def __str__(self):
         assert(self.name)
-               
         return cpp_class.cpp_class_str.format(ClassName = self.name,
             Bases = '' if not self.bases else ':' + ','.join(map(str, self.bases)),
-            PublicDeclarations = '' if not self.public else 'public:\n' + '\n'.join(map(lambda item: str(item) + ';', self.public)), 
+            PublicDeclarations = '' if not self.public else 'public:\n' + '\n'.join(map(lambda item: str(item) + (';' if not isinstance(item, cpp_block) else ''), self.public)), 
             ProtectedDeclarations = '' if not self.protected else 'protected:\n' + ';\n'.join(map(str, self.protected)),
             PrivateDeclarations = '' if not self.private else 'private:\n' + ';\n'.join(map(str, self.private)),
         )
