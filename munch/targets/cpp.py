@@ -1,15 +1,9 @@
+from munch.utils import *
+
 class CppContext(object):
     def __init__(self):
-        self.before_init = []
-        self.method_translation = lambda ctx, data: None
-        self.class_translation = lambda ctx : None
-
         self.translated = []
         self.types = {}
-        
-        self.on_ctype_register = lambda ctype: ctype
-
-        self.MUNCH_ANY_TYPE = cpp_type('!@_MUNCH_YAMMY')
 
     def register_ctype(self, ctype):
         template_hash = tuple(map(lambda ctype: ctype.hash, ctype.templates))
@@ -120,16 +114,17 @@ class CppContext(object):
         
         return found.type_check(variable, found)
 
-    def translate_method(self, method, context = None, append = False):
-        method = self.method_translation(self, context, method)
-        if append: self.translated.append(method)
+    def translate_method(self, original_method, append = False):
+        orig, translated_method = apply_pipeline(self.method_translation_pipeline, original_method, None)
 
-        return method
+        if append and translated_method: self.translated.append(translated_method)
+
+        return translated_method
 
     def translate_class(self, in_cls, append = True):        
-        cls = self.class_translation(self, in_cls)
+        cls, translated_class = apply_pipeline(self.class_translation_pipeline, in_cls, None)
         
-        if append: self.translated.append(cls)
+        if append and translated_class: self.translated.append(translated_class)
 
         return cls
 
@@ -143,6 +138,143 @@ class CppContext(object):
             elif type(item) == cpp_class:
                 print 'processing cpp class: %r' % item
                 self.translate_class(item)
+
+
+class CppContextBuilder(object):
+    def __init__(self):
+        self.context_holder = {
+            'initialization' : [],
+            'method' : [],
+            'class' : [],
+            'types' : {}
+        }
+
+        self.context_order = ('initialization', 'method', 'class')
+        self.preprocess = []
+        self.variable_initializers = []
+        self.variable_checkers = []
+        self.var_from_target = []
+        self.var_to_target = []
+
+    def add_preprocess(self, translator_name, processor):
+        self.preprocess.append((translator_name, processor))
+
+    def add_translation(self, context_name, translator_name, translator, before):
+        queue = self.context_holder[context_name]
+
+        if before:
+            for i, item in enumerate(queue):
+                if item[0] == before:
+                    queue.insert(i - 1, (translator_name, translator))
+        else:
+            queue.append((translator_name, translator))
+
+    def bake(self, data):
+        ctx = CppContext()
+
+        for preprocess in self.preprocess:
+            preprocess(data, ctx)
+
+        for init in self.context_holder['initialization']:
+            init(data, ctx)       
+
+def preprocess(trans_id, context_builder, before = None):   
+    def decorator(function):
+        context_builder.add_preprocess(trans_id, function)
+        return function
+
+    return decorator
+
+def translation_initialization(trans_id, comparator, context_builder, before = None):
+    def decorator(function):        
+        def wrapped_method_translation(original_method, translated_method, context):
+            if comparator(original_method):
+                function(original_method, translated_method, context)
+        
+        context_builder.add_translation('initialization', trans_id, wrapped_method_translation, before)
+        return wrapped_method_translation
+
+    return decorator
+
+def method_translation(trans_id, comparator, context_builder, before = None):
+    def decorator(function):        
+        def wrapped_method_translation(original_method, translated_method, context):
+            if comparator(original_method):
+                function(original_method, translated_method, context)
+        
+        context_builder.add_translation('method', trans_id, wrapped_method_translation, before)
+        return wrapped_method_translation
+
+    return decorator
+
+def class_translation(trans_id, comparator, context_builder, before = None):
+    def decorator(function):        
+        def wrapped_method_translation(original, translated, context):
+            if comparator(original):
+                function(original, translated, context)
+        
+        context_builder.add_translation('class', trans_id, wrapped_method_translation, before)
+        return wrapped_method_translation
+
+    return decorator
+
+def type_translation(trans_id, comparator, context_builder, before = None):
+    def decorator(function):        
+        def wrapped_method_translation(original, translated, context):
+            if comparator(original):
+                function(original, translated, context)
+        
+        context_builder.add_translation('type', trans_id, wrapped_method_translation, before)
+        return wrapped_method_translation
+
+    return decorator
+
+def variable_initialization(ctype, comparator, context_builder):
+    def decorator(function):        
+        def wrapped_method_translation(original, context):
+            if comparator(original):
+                function(original, context)
+        
+        context_builder.variable_initializers.append((ctype, wrapped_method_translation))
+        return wrapped_method_translation
+
+    return decorator
+
+def variable_check(ctype, comparator, context_builder):
+    def decorator(function):        
+        def wrapped_method_translation(original, context):
+            if comparator(original):
+                function(original, context)
+        
+        context_builder.variable_checkers.append((ctype, wrapped_method_translation))
+        return wrapped_method_translation
+
+    return decorator
+
+def variable_conversion_from_target_language(ctype, comparator, context_builder):
+    def decorator(function):        
+        def wrapped_method_translation(original, context):
+            if comparator(original):
+                function(original, context)
+        
+        context_builder.var_from_target.append((ctype, wrapped_method_translation))
+
+        return wrapped_method_translation
+    return decorator
+
+def variable_conversion_to_target_language(ctype, comparator, context_builder):
+    def decorator(function):        
+        def wrapped_method_translation(original, context):
+            if comparator(original):
+                function(original, context)
+        
+        context_builder.var_to_target.append((ctype, wrapped_method_translation))
+
+        return wrapped_method_translation
+    return decorator
+
+
+
 
 class cpp_assignment(object):
     def __init__(self, expr_a, expr_b):
@@ -497,3 +629,10 @@ class {ClassName} {Bases}
             ProtectedDeclarations = '' if not self.protected else 'protected:\n' + ';\n'.join(map(str, self.protected)),
             PrivateDeclarations = '' if not self.private else 'private:\n' + ';\n'.join(map(str, self.private)),
         )
+
+
+#we create a type to mach any other type
+
+MUNCH_ANY_TYPE = cpp_type('!@_MUNCH_YAMMY')
+MUNCH_ANY_TYPE.__eq__ = lambda self, other: True
+MUNCH_ANY_TYPE.__ne__ = lambda self, other: False

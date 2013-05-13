@@ -1,7 +1,6 @@
 from munch.targets import cpp
 from munch.conversor import lua
 
-
 def test_context_initialization():
     context = lua.create_context()
 
