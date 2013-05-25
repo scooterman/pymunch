@@ -1,18 +1,10 @@
 from munch.targets import cpp
 from munch.conversor import lua
 
-def test_context_initialization():
-    context = lua.create_context()
-
-    cint = cpp.cpp_type('int')
-    assert context.get_ctype(cint).initializer({'name' : 'test'}, cint)
-
 def test_method_1():
-    context = lua.create_context()
-
     method = cpp.cpp_method('method')
 
-    context.munch([method])
+    context = lua.lua_context_builder.bake([method])
 
     assert len(context.translated) == 1
 
@@ -23,25 +15,24 @@ def test_method_1():
 
     assert not t_method.lua_return
 
-def test_method_return():  
-    context = lua.create_context()  
+def test_method_return():
     method = cpp.cpp_method('method', returns=cpp.cpp_type('int'), return_value = 10)
 
-    context.munch([method])    
+    context = lua.lua_context_builder.bake([method])
     assert len(context.translated) == 1
     t_method = context.translated[0]
     
     assert t_method.static
     assert t_method.name == 'lua_munch_method'
 
-    assert t_method.lua_return
+    assert t_method.lua_return         
 
 def test_method_param_lua_primitives():  
-    context = lua.create_context()  
     method = cpp.cpp_method('method', 
                 params=[cpp.cpp_variable('myvar', cpp.cpp_type('int'))])
 
-    context.munch([method])    
+    context = lua.lua_context_builder.bake([method])
+
     assert len(context.translated) == 1
     t_method = context.translated[0]
     
@@ -53,16 +44,15 @@ def test_method_param_lua_primitives():
     assert t_method.initialization[0] ==  method.parameters[0]
 
 def test_method_param_class():
-    context = lua.create_context()
     method = cpp.cpp_method('method', 
                 params=[cpp.cpp_variable('myvar', cpp.cpp_type('MyTestClass', const=True))])
 
-    var = context.apply_initializer(method.parameters[0])
+    var = lua.lua_context_builder.apply_variable_initialization(method.parameters[0], None)
 
-    assert type(var.ctype.name) == cpp.cpp_qual_type
+    assert type(var.ctype) == cpp.cpp_qual_type
     assert var.ctype.pointer == True
 
-    context.munch([method])
+    context = lua.lua_context_builder.bake([method])
 
     assert len(context.translated) == 1
 
@@ -74,16 +64,15 @@ def test_method_param_class():
     assert t_method.initialization[0]
 
 def test_class():
-    context = lua.create_context()
-
     cls = cpp.cpp_class('MyTest')
+    cls.qualname = "MyTest"
 
     method = cpp.cpp_method('method', 
               params=[cpp.cpp_variable('myvar', cpp.cpp_type('MyTestClass', const=True))])
 
     cls.public.append(method)
 
-    context.munch([cls])
+    context = lua.lua_context_builder.bake([cls])
 
     assert len(context.translated) == 1
 
@@ -92,7 +81,10 @@ def test_class():
     assert t_cls
     assert t_cls.name == 'lua_munch_MyTest'
 
-def test_class_method_overload():
+    print t_cls
+    assert False
+
+'''def test_class_method_overload():
     context = lua.create_context()
 
     cls = cpp.cpp_class('MyTest')
@@ -158,4 +150,4 @@ def test_class_base():
     print context.translated[0] 
     print t_cls
 
-    assert False
+    assert False'''

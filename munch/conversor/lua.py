@@ -92,7 +92,7 @@ lua_context_builder = cpp.CppContextBuilder()
 #preprocessing. Handling overloads for classes and stray functions
 @cpp.preprocess("preprocess", 
                     lua_context_builder)
-def lua_preprocess(context, data):
+def lua_preprocess(data, context):
     classes = filter(lambda item: type(item) == cpp.cpp_class, data)
     functions = filter(lambda item: type(item) == cpp.cpp_method, data)
     other = filter(lambda item: type(item) != cpp.cpp_method and type(item) != cpp.cpp_class, data)
@@ -108,7 +108,7 @@ def lua_preprocess(context, data):
 
     process_functions(fake_cls)
 
-    data = classes + fake_cls.public + other
+    data += classes + fake_cls.public + other
 
 #initializing methods. For each method we create a translation for it, and add some lua specific
 #variables to it
@@ -116,7 +116,9 @@ def lua_preprocess(context, data):
                         lambda item: type(item) == cpp.cpp_method, 
                     lua_context_builder)
 def init_translated_method(orig_method, context):
-    assert context.find_method(orig_method.name) == None
+    assert 'translation' not in orig_method.__dict__
+
+    print 'entered [init_translated_method] with method:', repr(orig_method)
 
     method = cpp.cpp_method('lua_munch_' + orig_method.name,
             static=True, returns= cpp.cpp_type('int'),
@@ -137,17 +139,14 @@ def init_translated_method(orig_method, context):
 
     method.return_value = cpp.cpp_return(0)
 
-    context.add_method(method)
-
     #we 'tie' the translated method on the original method
     #so it's easier to work with them without needing to search for them on every callback
-    orig_method.traslation = method
+    orig_method.translation = method
 
 @cpp.translation_initialization("init_classes", 
                         lambda item: type(item) == cpp.cpp_class, 
                     lua_context_builder)
 def init_translated_class(orig_class, context):
-    assert context.find_class(orig_class.name) == None
     assert 'translation' not in orig_class.__dict__
 
     lua_cls = cpp.cpp_class('lua_munch_' + orig_class.identifier_name)
@@ -155,9 +154,10 @@ def init_translated_class(orig_class, context):
     luaReg = cpp.cpp_variable_array('lua_reg_' + orig_class.identifier_name, 
                                 cpp.cpp_type('luaL_Reg', static=True))
 
-    for item in orig_class.public:
-        generated_method = context.translate_method(item, lua_cls)
-        lua_cls.public.append(generated_method)
+    class_ctx = lua_context_builder.bake(orig_class.public)
+
+    for item in class_ctx.translated:        
+        lua_cls.public.append(item)
 
         if type(item) == cpp.cpp_method and not item.is_constructor:
             luaReg.expr.append('{ "%s" , lua_munch_%s::lua_munch_%s }' % (item.name, orig_class.name, item.name)) 
@@ -187,8 +187,7 @@ def init_translated_class(orig_class, context):
     luaReg.expr.append('{ 0, 0 }')
 
     lua_cls.public.append(luaReg)
-
-    context.add_class(lua_cls)
+    orig_class.translation = lua_cls
 
 @cpp.method_translation("default_function",
                         lambda orig_method: not orig_method.is_overload,
@@ -202,14 +201,14 @@ def process_function(function, context):
 
     #firstly we add the default initializers for each mapped type
     for parameter in function.parameters:
-        method.initialization.append(context.apply_initializer(parameter))
+        method.initialization.append(lua_context_builder.apply_variable_initialization(parameter, context))
     
     #this additional step will ensure that the amount of parameters is correct
     method.validation.append('assert(lua_gettop(L) == %d)' % (len(function.parameters) + (0 if function.is_constructor else 1)))
 
     #then we add type checking
     for parameter in function.parameters:
-        method.validation.append(context.apply_type_check(parameter))
+        method.validation.append(lua_context_builder.apply_variable_check(parameter, context))
 
     #then we get the variables from LUA
     if function.parent:
@@ -222,11 +221,12 @@ def process_function(function, context):
             method.initialization.append('{0}* lua_self = lua_munch_{1}::get(L)'.format(function.parent.qualname, function.parent.identifier_name))
 
     for parameter in function.parameters:
-        method.recover.append(context.apply_variable_get(parameter))
+        print
+        method.recover.append(lua_context_builder.apply_variable_conversion_from_target(parameter, context))
 
     applied_parameters = []
     for parameter in function.parameters:
-        applied_parameters.append(context.apply_variable_dereference(parameter))
+        applied_parameters.append(cpp.cpp_dereference(parameter))
 
     #then we call the original method!
     method.execution.append(cpp.cpp_method_call(function.name if not function.parent else 'lua_self->' + function.name, applied_parameters))
@@ -242,11 +242,10 @@ def process_function(function, context):
         method.execution[0] = assign
 
         #push the value to lua
-        method.lua_return.append(context.apply_variable_set(assign.expr_a))
+        method.lua_return.append(lua_context_builder.apply_variable_conversion_to_target(assign.expr_a, context))
 
         #and then change the call function to 1 so LUA knows it has one value to unpack
         method.return_value = cpp.cpp_return(1)
-
 
     method.exprs += method.initialization + method.validation + method.recover + method.execution + method.lua_return
 
@@ -363,7 +362,6 @@ def initialize_primitive(ctype, context_builder, lua_type, lua_get, lua_set):
     def variable_dereference(variable, context):
         return variable.name
 
-
 initialize_primitive(cpp.cpp_type('int'),  lua_context_builder, 'LUA_TNUMBER','luaL_checkinteger','lua_pushnumber')
 initialize_primitive(cpp.cpp_type('float'), lua_context_builder, 'LUA_TNUMBER','luaL_checknumber','lua_pushnumber')
 initialize_primitive(cpp.cpp_type('double'), lua_context_builder,'LUA_TNUMBER','luaL_checknumber','lua_pushnumber')
@@ -377,7 +375,7 @@ initialize_primitive(cpp.cpp_type('basic_string', templates=[cpp.cpp_type('char'
                                                'lua_pushnumber')
 
 #overrinding the default variable initialization for std::string
-@cpp.variable_initialization(cpp.MUNCH_ANY_TYPE,
+@cpp.variable_initialization(cpp.cpp_type('basic_string', templates=[cpp.cpp_type('char')]),
                              lambda item: True,
                              lua_context_builder)
 def string_initializer(variable, ctype):
