@@ -81,19 +81,19 @@ def test_class():
     assert t_cls
     assert t_cls.name == 'lua_munch_MyTest'
 
-    print t_cls
-    assert False
-
-'''def test_class_method_overload():
-    context = lua.create_context()
-
+def test_class_method_overload():
     cls = cpp.cpp_class('MyTest')
+    cls.qualname = "MyTest"
 
     method = cpp.cpp_method('method', 
               params=[cpp.cpp_variable('myvar', cpp.cpp_type('MyTestClass', const=True))])
 
     method1 = cpp.cpp_method('method', 
               params=[cpp.cpp_variable('myvar', cpp.cpp_type('int', const=True))])
+
+    method2 = cpp.cpp_method('method', 
+              params=[cpp.cpp_variable('myvar', cpp.cpp_type('int', const=True)),
+                      cpp.cpp_variable('othervar', cpp.cpp_type('int', const=True))])    
     
     cls.public.append(method)
     method.parent = cls
@@ -101,7 +101,10 @@ def test_class():
     cls.public.append(method1)
     method1.parent = cls
 
-    context.munch([cls])
+    cls.public.append(method2)
+    method2.parent = cls
+
+    context = lua.lua_context_builder.bake([cls])
 
     assert len(context.translated) == 1
 
@@ -110,20 +113,22 @@ def test_class():
     assert t_cls
     assert t_cls.name == 'lua_munch_MyTest'
 
-def test_class_base():
-    context = lua.create_context()
-
+def test_class_base():    
     base = cpp.cpp_class('base')
+    base.qualname = 'MyBaseClass'
 
     bmethod = cpp.cpp_method('base_method', 
-              params=[cpp.cpp_variable('int', cpp.cpp_type('int'))])
+              params=[cpp.cpp_variable('variable', cpp.cpp_type('int'))])
+    
+    bmethod.is_virtual = True
 
     base.public.append(bmethod)
     
     bmethod.parent = base
 
     cls = cpp.cpp_class('MyTest')
-
+    cls.qualname = 'MyTestClass'
+    
     cls.bases.append(base)
 
     method = cpp.cpp_method('method', 
@@ -138,7 +143,7 @@ def test_class_base():
     cls.public.append(method1)
     method1.parent = cls
 
-    context.munch([base, cls])
+    context = lua.lua_context_builder.bake([base, cls])
 
     assert len(context.translated) == 2
 
@@ -148,6 +153,7 @@ def test_class_base():
     assert t_cls.name == 'lua_munch_MyTest'
 
     print context.translated[0] 
+    
     print t_cls
 
-    assert False'''
+    assert False

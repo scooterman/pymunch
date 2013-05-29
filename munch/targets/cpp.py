@@ -1,7 +1,6 @@
 from munch.utils import *
 from functools import wraps
 import logging
-import inspect
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -36,7 +35,9 @@ class CppContextBuilder(object):
             queue.append((translator_name, translator))
 
     def translate_method(self, original_method, context, append = False):
+        logging.debug('translating method: ' + original_method.name)
         for tag, translator in self.method_translation:
+            logging.debug('\tTrying to match on rule: ' + tag)
             translator(original_method, context)
 
         if append and original_method.translation:
@@ -73,26 +74,31 @@ class CppContextBuilder(object):
             res = trans(in_var, context)
             if res: return res
 
-    def bake(self, data, context = None):
+    def bake(self, data, preprocess = True, initialize = True, translate = True):
+        logging.debug('baking data: %s' % data)
         ctx = CppContext()
 
-        for tag, preprocess in self.preprocess:
-            logging.debug('preprocessing:' + tag)
-            preprocess(data, ctx)
+        if preprocess:
+            for tag, preprocess in self.preprocess:
+                logging.debug('preprocessing:' + tag)
+                preprocess(data, ctx)
 
-        for item in data:
-            for tag, init in self.initialization:
-                logging.debug('initializing:' + tag)
-                init(item, ctx)   
+        if initialize:
+            for item in data:
+                for tag, init in self.initialization:
+                    logging.debug('initializing:' + tag)
+                    init(item, ctx)   
 
-        for item in data:
-            if type(item) == cpp_method:
-                self.translate_method(item, ctx, True)
+        if translate:
+            for item in data:
+                if type(item) == cpp_method:
+                    self.translate_method(item, ctx, True)
 
-        for item in data:
-            if type(item) == cpp_class:
-                self.translate_class(item, ctx, True)
+            for item in data:
+                if type(item) == cpp_class:
+                    self.translate_class(item, ctx, True)
 
+        logging.debug('finished baking!')
         return ctx
 
 def preprocess(trans_id, context_builder, before = None):    
@@ -121,6 +127,7 @@ def method_translation(trans_id, comparator, context_builder, before = None):
     def decorator(function):
         @wraps(function)
         def wrapped_method_translation(original_method, context):
+            logging.debug('\t\t ' + trans_id + ' matches? ' + str(comparator(original_method)))
             if comparator(original_method):
                 function(original_method, context)
         
@@ -275,6 +282,8 @@ class cpp_block(object):
 
 
 class cpp_if (cpp_block):
+    if_str = 'if ({exprs}) {{ \n {body} }} {elseBlock}'
+
     def __init__(self, expr = [], body = []):
         cpp_block.__init__(self)
         self.body = list(body)
@@ -285,10 +294,10 @@ class cpp_if (cpp_block):
 
     def __str__(self):
         assert(self.exprs)
-        return 'if (%s) { \n %s } %s' % \
-            ('\n'.join(map(str, self.exprs)), 
-             ''.join(map(lambda body: str(body) + ';\n', self.body)),
-             '' if not self.cpp_else else ' else %s ' % str(self.cpp_else))
+
+        return cpp_if.if_str.format(exprs = '\n'.join(map(str, self.exprs)),
+                             body = ''.join(map(lambda body: str(body) + ';\n', self.body)),
+                             elseBlock = '' if not self.cpp_else else ' else ' + str(self.cpp_else))
 
 class cpp_return(object):
     def __init__(self, expr):
@@ -500,7 +509,7 @@ class cpp_method_call(object):
         self.parent = None
 
     def __repr__(self):
-        return '<method call: "%s" >' % self.expr
+        return '<method call: "%s" (%s) >' % (self.expr, id(self))
 
     def __str__(self):
         assert(self.expr)
@@ -528,7 +537,7 @@ class cpp_method(cpp_block):
         self.is_virtual = is_virtual
 
     def __repr__(self):
-        return '< cpp method: "%s" >' % self.name
+        return '< cpp method: "%s" (%s) >' % (self.name, id(self))
 
     def __str__(self):
         assert(self.name)
@@ -538,7 +547,7 @@ class cpp_method(cpp_block):
                     static = 'static' if self.static else '', 
                     func_name=self.name,
                     param_list=','.join(map(str, self.parameters)),
-                    body='\n'.join(map(lambda expr: str(expr) + ';' if not isinstance(expr, cpp_block) else '',  self.exprs)),
+                    body='\n'.join(map(lambda expr: str(expr) + (';' if not isinstance(expr, cpp_block) else ''),  self.exprs)),
                     return_value= '' if not self.return_value else str(self.return_value) + ';')
 
 class cpp_class(object):
