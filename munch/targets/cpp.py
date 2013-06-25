@@ -1,6 +1,7 @@
 from munch.utils import *
 from functools import wraps
 import logging
+import copy
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -112,7 +113,7 @@ def preprocess(trans_id, context_builder, before = None):
     return decorator
 
 def translation_initialization(trans_id, comparator, context_builder, before = None):
-    def decorator(function):        
+    def decorator(function):
         @wraps(function)
         def wrapped_translation_initialization(original_method, context):
             if comparator(original_method):
@@ -248,6 +249,18 @@ class cpp_dereference(object):
         assert type(self.expr) == cpp_variable or type(self.exr) == str
         return '*' + str(self.expr.name)
 
+class cpp_reference(object):
+    def __init__(self, expr):
+        self.expr = expr
+
+    def __repr__(self):
+        return '< reference >'
+
+    def __str__(self):
+        assert self.expr
+        assert type(self.expr) == cpp_variable or type(self.exr) == str
+        return '&' + str(self.expr.name)
+
 class cpp_and:
     def __init__(self, expr = []):
         self.exprs = list(expr)
@@ -381,12 +394,48 @@ class cpp_variable(object):
 
     def __repr__(self):
         return '<cpp variable: "%s %s" >' % (self.ctype, self.name)
+   
+    #casts this variable to another ctype
+    #returns a cast_class object with all convertions made
+    def cast(self, cast_class, to_ctype):
+
+        logging.debug("[CAST] trying to cast %r from %r to %r" % (self, self.ctype, to_ctype))
+
+        #if the original type is equal to the cast type, we return a transparent string
+        if self.ctype == to_ctype:
+            logging.debug("[CAST] equal objects, returning")
+            return self.name
+
+        res_var = copy.deepcopy(self)
+
+        if to_ctype.is_pointer() and not self.ctype.is_pointer():
+            res_var = cpp_reference(res_var)
+
+        if to_ctype.is_reference() and self.ctype.is_pointer():
+            res_var = cpp_dereference(res_var)
+
+        logging.debug("[CAST] result expression: %r" % (res_var))
+        return cast_class(to_ctype, res_var)
 
     def __str__(self):
         assert(self.ctype)
         assert(self.name)
         
         return ('%s %s %s' % (self.ctype,  self.name, '' if self.expr == None else '= %s' % str(self.expr))).strip()
+
+class cpp_static_cast(object):
+    def __init__(self, ctype_to_cast, expression):
+        self.ctype_to_cast = ctype_to_cast
+        self.expression = expression
+
+    def __repr__(self):
+        return '<cpp static cast: "%s %s" >' % (self.ctype_to_cast, self.expression)
+
+    def __str__(self):
+        return 'static_cast<{}>({})'.format(
+                self.ctype_to_cast,
+                self.expression
+            )
 
 class cpp_variable_array(object):
     def __init__(self, name, ctype, expr = []):
@@ -451,12 +500,13 @@ def cpp_type(*args, **kwargs):
     return cpp_qual_type(*args, **kwargs)
 
 class cpp_qual_type(object):
-    def __init__(self, name, pointer=False, static=False, const=False, reference=False, templates=[]):
+    bitflag_static = 1
+    bitflag_pointer = 2
+    bitflag_const = 4
+    bitflag_reference = 8
+
+    def __init__(self, name, pointer=False, static=False, const=False, reference=False, templates=[], **kwargs):
         self.name = name
-        self.pointer = pointer
-        self.static = static
-        self.const = const
-        self.reference = reference
         self.templates = list(templates)
         self.bitflags = 0
         self.initializer = None
@@ -465,25 +515,59 @@ class cpp_qual_type(object):
         self.variable_set = None
         self.type_conversion = None
         self.variable_dereference = None
-        self.update_bitflags()
+
+        self.update_bitflags(pointer, static, const, reference)
+
+    def is_pointer(self):
+        return cpp_qual_type.bitflag_pointer & self.bitflags 
+
+    def is_static(self):
+        return cpp_qual_type.bitflag_static & self.bitflags 
+
+    def is_const(self):
+        return cpp_qual_type.bitflag_const & self.bitflags         
+
+    def is_reference(self):
+        return cpp_qual_type.bitflag_reference & self.bitflags 
+
+    #returns the qualifiers for the current ctype, nested to the deepest
+    #item
+    def recover_qualifiers(self):
+        if not type(self.name) is str:
+            return self.recover_qualifiers(ctype.name)
+
+        return 'const' if self.is_const() else '' + \
+               '*' if self.is_pointer() else '' + \
+               '&' if self.is_reference() else '' 
+
+    #Simply changing an attribute can cause
+    #major problems since we're changing the memoized object
+    #so we have to mutate it with new attributes
+    def mutate(self, **kwargs):
+        newcpy = copy.deepcopy(self.__dict__)
+        newcpy.update(kwargs)
+
+        return cpp_type(**newcpy)
 
     def __hash__(self):        
         return self.hash
 
     def __eq__(self, other):
+        logging.debug('[QUALTYPE] __eq__: %r[%s, %d] == %r[%s, %d]' %(self, self.name, self.bitflags, other, other.name, other.bitflags))
         return self.name == other.name and self.bitflags == other.bitflags
 
     def __ne__(self, other):
         return not self == other
    
-    def update_bitflags(self):
+    def update_bitflags(self, pointer, static, const, reference):
         attr = 0
+        logging.debug('[QUALTYPE] update bitflags: %d %d %d %d' %( pointer, static, const, reference))
+        attr |= cpp_qual_type.bitflag_static * int(static)
+        attr |= cpp_qual_type.bitflag_pointer * int(pointer)
+        attr |= cpp_qual_type.bitflag_const * int(const)
+        attr |= cpp_qual_type.bitflag_reference * int(reference)
 
-        attr &= int(self.static) ** 2
-        attr &= (2 * int(self.pointer)) ** 2
-        attr &= (3 * int(self.const)) ** 2
-        attr &= (4 * int(self.reference)) ** 2
-
+        logging.debug('[QUALTYPE] update bitflags result: %d %d' %(attr, cpp_qual_type.bitflag_pointer))
         self.bitflags = attr
 
     def __repr__(self):
@@ -493,12 +577,12 @@ class cpp_qual_type(object):
         assert(self.name)
 
         result = '%s %s %s%s%s%s' %\
-            ('static' if self.static else '',
-             'const' if self.const else '',
+            ('static' if self.is_static() else '',
+             'const' if self.is_const() else '',
              str(self.name),
              '<%s>' % (','.join(map(str, self.templates))) if self.templates else '',
-             '*' if self.pointer else '',
-             '&' if self.reference else '')
+             '*' if self.is_pointer() else '',
+             '&' if self.is_reference() else '')
         
         return result.strip()
 
