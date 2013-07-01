@@ -3,6 +3,8 @@ from munch.targets import cpp
 from copy import deepcopy
 import logging
 
+logging.basicConfig(format='[%(asctime)s] p%(process)s {%(pathname)s:%(lineno)d} %(levelname)s - %(message)s')
+
 def is_basic(t):
     return t.name == 'int' or t.name == 'float' or t.name == 'basic_string' \
           or t.name == 'bool' or t.name == 'char'

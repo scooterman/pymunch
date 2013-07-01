@@ -3,7 +3,13 @@ from functools import wraps
 import logging
 import copy
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG, format='{%(filename)s:%(lineno)d} - %(message)s')
+
+qualtype_logger = logging.getLogger('QUALTYPE')
+qualtype_logger.disabled = True
+
+variable_logger = logging.getLogger('VARIABLE')
+#variable_logger.disabled = True
 
 class CppContext(object):
     def __init__(self):
@@ -19,6 +25,48 @@ class CppContextBuilder(object):
         self.variable_checkers = []
         self.var_from_target = []
         self.var_to_target = []
+
+        self.initializer_matcher = {}
+        self.var_to_target_matcher = {}
+        self.var_from_target_matcher = {}
+        self.var_checker_macher = {}
+
+    def get_matcher_list(self, matcher_name):
+        matcher = None
+        items = None
+
+        if matcher_name == "init":
+            matcher = self.initializer_matcher
+            items = self.variable_initializers
+        elif matcher_name == "checker":
+            matcher = self.var_checker_macher
+            items = self.variable_checkers
+        elif matcher_name == "to_target":
+            matcher = self.var_to_target_matcher
+            items = self.var_to_target
+        elif matcher_name == "from_target":
+            matcher = self.var_from_target_matcher
+            items = self.var_from_target
+
+        assert matcher != None
+        assert items != None
+
+        return matcher, items
+
+    def matches(self, matcher_name, item, other):
+        matcher, _ = self.get_matcher_list(matcher_name)
+        return matcher[id(item)] == other
+
+    def build_matcher(self, matcher_name, ctype):
+        matcher, items = self.get_matcher_list(matcher_name)
+
+        #we set the best match for @ctype iterating over all items from a list and getting it's proximity values
+        heights = map(lambda item: (item[0], item[0].conforms_match(ctype)), items)
+        heights.sort(reverse=True, cmp=lambda a, b: a[1] - b[1])
+        
+        logging.debug('Building matcher for %r on list %s. Matched: %r with height %d', ctype, matcher_name, heights[0][0], heights[0][1])
+
+        matcher[id(ctype)] = heights[0][0]
 
     def add_preprocess(self, translator_name, processor):
         self.preprocess.append((translator_name, processor))
@@ -36,7 +84,7 @@ class CppContextBuilder(object):
             queue.append((translator_name, translator))
 
     def translate_method(self, original_method, context, append = False):
-        logging.debug('translating method: ' + original_method.name)
+        logging.debug('Trying to translate method: ' + original_method.name)
         for tag, translator in self.method_translation:
             logging.debug('\tTrying to match on rule: ' + tag)
             translator(original_method, context)
@@ -84,12 +132,14 @@ class CppContextBuilder(object):
                 logging.debug('preprocessing:' + tag)
                 preprocess(data, ctx)
 
+        logging.debug('INITIALIZATION PHASE')
         if initialize:
             for item in data:
                 for tag, init in self.initialization:
-                    logging.debug('initializing:' + tag)
+                    logging.debug('initializing: [%s] for item: %s ', tag, repr(item))
                     init(item, ctx)   
 
+        logging.debug('TRANSLATION PHASE')                    
         if translate:
             for item in data:
                 if type(item) == cpp_method:
@@ -165,14 +215,20 @@ def variable_initialization(ctype, comparator, context_builder):
     def decorator(function):
         @wraps(function)        
         def wrapped_variable_initialization(original, context):
-            logging.debug("[VARINIT] Testing ctype %r for variable %r" % (ctype, original))
+            variable_logger.debug("[VARINIT] Testing ctype %r for variable %r" % (ctype, original))
 
-            if comparator(original) and ctype == original.ctype:
-                logging.debug("\tMatched. Applying function: %r" % function)
+            if not id(original.ctype) in context_builder.initializer_matcher:
+                context_builder.build_matcher('init', original.ctype)
+
+            if comparator(original) and context_builder.matches('init',                                                                 
+                                                                original.ctype,
+                                                                ctype):
+                variable_logger.debug("\tMatched. Applying function: %r" % function)
             
                 return function(original, context)
             
-            logging.debug("\tNot matched.")            
+            variable_logger.debug("\tNot matched.")        
+
             return False
 
         context_builder.variable_initializers.append((ctype, wrapped_variable_initialization))
@@ -184,11 +240,18 @@ def variable_check(ctype, comparator, context_builder):
     def decorator(function):
         @wraps(function)      
         def wrapped_variable_check(original, context):
-            logging.debug("[VARCHECK] Testing ctype %r for variable %r" % (ctype, original))
-            if comparator(original) and original.ctype == ctype:
-                logging.debug("\tMatched. Applying function: %r" % function)
+
+            if not id(original.ctype) in context_builder.var_checker_macher:
+                context_builder.build_matcher('checker', original.ctype)
+
+            variable_logger.debug("[VARCHECK] Testing ctype %r for variable %r" % (ctype, original))
+            
+            if comparator(original) and context_builder.matches('checker',                                                                 
+                                                                original.ctype,
+                                                                ctype):
+                variable_logger.debug("\tMatched. Applying function: %r" % function)
                 return function(original, context)
-            logging.debug("\tNot matched.")
+            variable_logger.debug("\tNot matched.")
             return False
 
         context_builder.variable_checkers.append((ctype, wrapped_variable_check))
@@ -200,8 +263,16 @@ def variable_conversion_from_target_language(ctype, comparator, context_builder)
     def decorator(function):
         @wraps(function)        
         def wrapped_variable_conversion_from_target_language(original, context):
-            if comparator(original) and original.ctype == ctype:
+            if not id(original.ctype) in context_builder.var_from_target_matcher:
+                context_builder.build_matcher('from_target', original.ctype)
+
+            if comparator(original) and context_builder.matches('from_target',                                                                 
+                                                                original.ctype,
+                                                                ctype):
+                variable_logger.debug("\tMatched. Applying function: %r" % function)
                 return function(original, context)
+
+            variable_logger.debug("\tNot matched.")
             return False
 
         context_builder.var_from_target.append((ctype, wrapped_variable_conversion_from_target_language))
@@ -214,8 +285,15 @@ def variable_conversion_to_target_language(ctype, comparator, context_builder):
     def decorator(function):
         @wraps(function)
         def wrapped_variable_conversion_to_target_language(original, context):
-            if comparator(original) and ctype == original.ctype:
+            if not id(original.ctype) in context_builder.var_to_target_matcher:
+                context_builder.build_matcher('to_target', original.ctype)
+
+            if comparator(original) and context_builder.matches('to_target',                                                                 
+                                                                original.ctype,
+                                                                ctype):
+                variable_logger.debug("\tMatched. Applying function: %r" % function)
                 return function(original, context)
+            variable_logger.debug("\tNot matched.")
             return False
 
         context_builder.var_to_target.append((ctype, wrapped_variable_conversion_to_target_language))
@@ -411,8 +489,10 @@ class cpp_variable(object):
         if to_ctype.is_pointer() and not self.ctype.is_pointer():
             res_var = cpp_reference(res_var)
 
-        if to_ctype.is_reference() and self.ctype.is_pointer():
+        elif to_ctype.is_reference() and self.ctype.is_pointer():
             res_var = cpp_dereference(res_var)
+        else:
+            res_var = res_var.name
 
         logging.debug("[CAST] result expression: %r" % (res_var))
         return cast_class(to_ctype, res_var)
@@ -453,11 +533,24 @@ class cpp_variable_array(object):
 
         return ('%s %s %s' % (self.ctype,  self.name, '' if self.expr == None else '[%d] = { %s }' % (len(self.expr), ','.join(map(str, self.expr))))).strip()
 
+
+
+
 mark = object()
 def get_id_tuple(f, *args, **kwargs):
-    """ 
-    Some quick'n'dirty way to generate a unique key for an specific call.
-    """
+    def flatten(values, output):
+        for i in values:
+            if type(i) in (list, tuple):
+                flatten(i, output)
+            elif type(i) == dict:
+                for k, v in i:
+                    output.append(k)
+                    flatten(v, output)
+            elif type(i) in (str, unicode, int, long, bool):
+                output.append(hash(i))
+            else:
+                output.append(id(i))
+
     if f:
         l = [id(f)]
     else:
@@ -465,17 +558,13 @@ def get_id_tuple(f, *args, **kwargs):
 
     global mark
 
-    for arg in args:
-        if type(arg) in (list, tuple):
-            l += get_id_tuple(None, *arg, **kwargs)
-        else:
-            l.append(id(arg))
+    flatten(args, l)
 
     l.append(id(mark))
 
     for k, v in kwargs:
         l.append(k)
-        l.append(id(v))
+        flatten(v, l)
 
     return tuple(l)
 
@@ -485,9 +574,8 @@ def memoize(f):
     Some basic memoizer
     """
     def memoized(*args, **kwargs):
-        key = get_id_tuple(f, args, kwargs)
-
-        global _memoized
+        key = get_id_tuple(f, args, kwargs)     
+        
         if key not in _memoized:
             _memoized[key] = f(*args, **kwargs)
             _memoized[key].hash = sum(key)
@@ -496,8 +584,11 @@ def memoize(f):
     return memoized
 
 @memoize
-def cpp_type(*args, **kwargs):
+def cpp_type_internal(*args, **kwargs):
     return cpp_qual_type(*args, **kwargs)
+
+def cpp_type(name, pointer=False, static=False, const=False, reference=False, templates=[], spelling=[]):
+    return cpp_type_internal(name, pointer, static, const, reference, templates, spelling)
 
 class cpp_qual_type(object):
     bitflag_static = 1
@@ -505,10 +596,11 @@ class cpp_qual_type(object):
     bitflag_const = 4
     bitflag_reference = 8
 
-    def __init__(self, name, pointer=False, static=False, const=False, reference=False, templates=[], **kwargs):
+    def __init__(self, name, pointer=False, static=False, const=False, reference=False, templates=[], spelling=[]):
         self.name = name
         self.templates = list(templates)
-        self.bitflags = 0
+        self.spelling = list(spelling)
+        self._bitflags = 0
         self.initializer = None
         self.type_check = None
         self.variable_get = None
@@ -519,16 +611,16 @@ class cpp_qual_type(object):
         self.update_bitflags(pointer, static, const, reference)
 
     def is_pointer(self):
-        return cpp_qual_type.bitflag_pointer & self.bitflags 
+        return cpp_qual_type.bitflag_pointer & self._bitflags 
 
     def is_static(self):
-        return cpp_qual_type.bitflag_static & self.bitflags 
+        return cpp_qual_type.bitflag_static & self._bitflags 
 
     def is_const(self):
-        return cpp_qual_type.bitflag_const & self.bitflags         
+        return cpp_qual_type.bitflag_const & self._bitflags         
 
     def is_reference(self):
-        return cpp_qual_type.bitflag_reference & self.bitflags 
+        return cpp_qual_type.bitflag_reference & self._bitflags 
 
     #returns the qualifiers for the current ctype, nested to the deepest
     #item
@@ -544,34 +636,46 @@ class cpp_qual_type(object):
     #major problems since we're changing the memoized object
     #so we have to mutate it with new attributes
     def mutate(self, **kwargs):
-        newcpy = copy.deepcopy(self.__dict__)
-        newcpy.update(kwargs)
+        pointer = self.is_pointer() or ('pointer' in kwargs and kwargs['pointer'])
+        static = self.is_pointer() or ('static' in kwargs and kwargs['static'])
+        const = self.is_pointer() or ('const' in kwargs and kwargs['const'])
+        reference = self.is_pointer() or ('reference' in kwargs and kwargs['reference'])
+        templates = self.templates if not 'templates' in kwargs else kwargs['templates']
+        spelling = self.spelling if not 'spelling' in kwargs else kwargs['spelling']
 
-        return cpp_type(**newcpy)
+        return cpp_type(self.name, pointer, static, const, reference, templates, spelling)
 
     def __hash__(self):        
         return self.hash
 
     def __eq__(self, other):
-        logging.debug('[QUALTYPE] __eq__: %r[%s, %d] == %r[%s, %d]' %(self, self.name, self.bitflags, other, other.name, other.bitflags))
-        return self.name == other.name and self.bitflags == other.bitflags
+        qualtype_logger.debug('QUALTYPE __eq__: %r[%s, %d] == %r[%s, %d]' %(self, self.name, self._bitflags, other, other.name, other._bitflags))
+        return (self.name == other.name or other.name in self.spelling) and self._bitflags == other._bitflags
 
     def __ne__(self, other):
         return not self == other
+
+    def conforms_match(self, other):
+        base = 2 * int(self.name == other.name or other.name in self.spelling)
+        
+        if base:
+            base += (self._bitflags & other._bitflags)
+
+        return base
    
     def update_bitflags(self, pointer, static, const, reference):
-        attr = 0
-        logging.debug('[QUALTYPE] update bitflags: %d %d %d %d' %( pointer, static, const, reference))
+        attr = 0        
+        qualtype_logger.debug('QUALTYPE update bitflags for %r: %d %d %d %d', self, pointer, static, const, reference)
         attr |= cpp_qual_type.bitflag_static * int(static)
         attr |= cpp_qual_type.bitflag_pointer * int(pointer)
         attr |= cpp_qual_type.bitflag_const * int(const)
         attr |= cpp_qual_type.bitflag_reference * int(reference)
 
-        logging.debug('[QUALTYPE] update bitflags result: %d %d' %(attr, cpp_qual_type.bitflag_pointer))
-        self.bitflags = attr
+        qualtype_logger.debug('QUALTYPE bitflags for %r: %d' , self, attr)
+        self._bitflags = attr
 
     def __repr__(self):
-        return '<cpp type: %s >' % self.__str__()
+        return '< cpp type: %s >' % self.__str__()
 
     def __str__(self):
         assert(self.name)
@@ -659,17 +763,14 @@ class {ClassName} {Bases}
         return cpp_class.cpp_class_str.format(ClassName = self.name,
             Bases = '' if not self.bases else ':' + ','.join(map(str, self.bases)),
             PublicDeclarations = '' if not self.public else 'public:\n' + '\n'.join(map(lambda item: str(item) + (';' if not isinstance(item, cpp_block) else ''), self.public)), 
-            ProtectedDeclarations = '' if not self.protected else 'protected:\n' + ';\n'.join(map(str, self.protected)),
-            PrivateDeclarations = '' if not self.private else 'private:\n' + ';\n'.join(map(str, self.private)),
+            ProtectedDeclarations = '' if not self.protected else 'protected:\n' + ';\n'.join(map(lambda item: str(item) + (';' if not isinstance(item, cpp_block) else ''), self.protected)),
+            PrivateDeclarations = '' if not self.private else 'private:\n' + ';\n'.join(map(lambda item: str(item) + (';' if not isinstance(item, cpp_block) else ''), self.private)),
         )
-
 
 #we create a type to mach any other type
 class munch_any_type(cpp_qual_type):
-    def __eq__(self, other):
-        return True
-
-    def __neq__(self, other):
-        return False
+    #we set any to 1, so if no item matches, any will
+    def conforms_match(self, other):
+        return 1
 
 MUNCH_ANY_TYPE = munch_any_type('!@_MUNCH_YAMMY')
