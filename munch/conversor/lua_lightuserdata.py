@@ -1,5 +1,5 @@
 from munch.targets import cpp
-from copy import deepcopy
+from copy import copy
 import logging
 
 def is_basic(t):
@@ -98,24 +98,54 @@ def lua_preprocess(data, context):
 
     del data[:]
 
+    #resolving overloads
     for item in classes:
         item.identifier_name = item.qualname.replace('::', '_')
         process_functions(item)
+
+    #resolving dependencies
+    sorted_classes = []
+    class_set = set([])
+
+    while classes:
+        current = classes.pop(0)
+        processed = True
+        
+        print 'testing', current.name, current.dependencies
+        for dependency in current.dependencies:
+            if 'std' in dependency or dependency == current.qualname:
+                continue
+
+            if not dependency in class_set:
+                print 'I dont have dependency: ', dependency
+                classes.append(current)
+                processed = False
+                break 
+
+        if processed:
+            print '### added', current.name
+            sorted_classes.append(current)
+            class_set.add(current.qualname)
 
     fake_cls = cpp.cpp_class('Fake')
     fake_cls.public = functions
 
     process_functions(fake_cls)
 
-    data += classes + fake_cls.public + other
+    data += sorted_classes + fake_cls.public + other
 
 def make_getter(lua_cls):
-    getter_str = '''static {ClassPtr}* get(lua_State* L, unsigned index) {{
-        assert( lua_islightuserdata(L, index));
-        return static_cast<{ClassPtr}*>(lua_touserdata(L, index));
-}}'''
+    cls_type = cpp.cpp_type(lua_cls.qualname, pointer=True)
+    getter = cpp.cpp_method('get',
+                static=True,
+                returns=cls_type,
+                params=[cpp.cpp_variable('L', cpp.cpp_type('lua_State', pointer=True)),
+                        cpp.cpp_variable('index', cpp.cpp_type('unsigned int'))])
 
-    return getter_str.format(ClassPtr=lua_cls.qualname)
+    getter.exprs.append('assert( lua_islightuserdata(L, index))')
+    getter.exprs.append(cpp.cpp_return(cpp.cpp_static_cast(cls_type, 'lua_touserdata(L, index)')))
+
+    return getter
 
 @cpp.translation_initialization("init_classes", 
                         lambda item: type(item) == cpp.cpp_class, 
@@ -124,15 +154,18 @@ def init_translated_class(orig_class, context):
     assert 'translation' not in orig_class.__dict__
 
     lua_cls = cpp.cpp_class('lua_munch_' + orig_class.identifier_name)
+    orig_class.translation = lua_cls
 
     luaReg = cpp.cpp_variable_array('lua_reg_' + orig_class.identifier_name, 
                                 cpp.cpp_type('constexpr luaL_Reg', static=True))
 
     logging.debug('baking methods for class: %s : %s' % (orig_class.name ,orig_class.public))
     
+    lua_cls.public.append(make_getter(orig_class))
+    
     #we now bake all methods and subclasses from this class, but not preprocess them
     class_ctx = lua_context_builder.bake(orig_class.public, preprocess=False)
-
+    
     for item in class_ctx.translated:
         if item.public:
             lua_cls.public.append(item)
@@ -140,9 +173,7 @@ def init_translated_class(orig_class, context):
             lua_cls.protected.append(item)
 
         if type(item) == cpp.cpp_method and not item.is_constructor and item.public:
-            luaReg.expr.append('{ "%s" , lua_munch_%s::%s }' % (item.orig_name, orig_class.identifier_name, item.name)) 
-
-    lua_cls.protected.append(make_getter(orig_class))
+            luaReg.expr.append('{ "%s" , lua_munch_%s::%s }' % (item.orig_name, orig_class.identifier_name, item.name))    
 
     #the base methods are shims that only retrieve it's self and pass it down to the
     #base class
@@ -186,10 +217,10 @@ def init_translated_method(orig_method, context):
             static=True, returns= cpp.cpp_type('int'),
             params=[cpp.cpp_variable('L', cpp.cpp_type('lua_State', pointer=True))])
     
-    method.orig_name = orig_method.name
+    if orig_method.parent:
+        method.parent = orig_method.parent.translation
 
-    if orig_method.is_virtual:
-        method.parameters.append(cpp.cpp_type(orig_method.parent.qualname, pointer= True))
+    method.orig_name = orig_method.name
 
     method.public = True
 
@@ -228,7 +259,7 @@ def process_overload_by_arg_count(orig_method, context):
 
         params = ['L']
         if orig_method.is_virtual:
-            params += 'lua_self'
+            params.append('lua_self')
 
         case.body.append(cpp.cpp_return(cpp.cpp_method_call('lua_munch_' + by_arg_count.name, params=params)))
 
@@ -253,12 +284,12 @@ def process_overload_by_arg_count(orig_method, context):
                             and not orig_method.is_overload,
                         lua_context_builder)
 def process_virtual_function_callback(orig_method, context):
-    lua_method = deepcopy(orig_method.translation)
-    lua_method.parameters.pop(-1)
-
+    lua_method = copy(orig_method.translation)    
+    lua_method.parameters = orig_method.translation.parameters[:-1]
+    
     lua_method.exprs = []
     lua_method.return_value = cpp.cpp_return(cpp.cpp_method_call(lua_method.name, params=['L', 'nullptr']))
-        
+    
     orig_method.translation.parent.public.append(lua_method)
 
 @cpp.method_translation("overloaded_function",
@@ -338,7 +369,7 @@ def process_function(function, context):
 
     method.exprs += method.initialization + method.validation + method.recover + method.execution + method.lua_return
 
-    logging.debug("finished translating.")
+    logging.debug("finished translating: %r", method)
 
 def initialize_primitive(ctype, context_builder, lua_type, lua_get, lua_set):
     @cpp.variable_initialization(ctype, 
@@ -371,11 +402,15 @@ def initialize_primitive(ctype, context_builder, lua_type, lua_get, lua_set):
     def variable_dereference(variable, context):
         return variable.name
 
-initialize_primitive(cpp.cpp_type('int'),  lua_context_builder, 'LUA_TNUMBER','luaL_checkinteger','lua_pushnumber')
+initialize_primitive(cpp.cpp_type('int'),  lua_context_builder, 'LUA_TNUMBER','luaL_checkinteger','lua_pushinteger')
+initialize_primitive(cpp.cpp_type('long'),  lua_context_builder, 'LUA_TNUMBER','luaL_checkinteger','lua_pushinteger')
 initialize_primitive(cpp.cpp_type('float'), lua_context_builder, 'LUA_TNUMBER','luaL_checknumber','lua_pushnumber')
 initialize_primitive(cpp.cpp_type('double'), lua_context_builder,'LUA_TNUMBER','luaL_checknumber','lua_pushnumber')
 initialize_primitive(cpp.cpp_type('bool'), lua_context_builder, 'LUA_TBOOLEAN','lua_toboolean','lua_pushboolean')
-initialize_primitive(cpp.cpp_type('char', pointer=True), lua_context_builder, 'LUA_TSTRING','luaL_checknumber','lua_pushnumber')
+initialize_primitive(cpp.cpp_type('char', pointer=True), lua_context_builder, 'LUA_TSTRING','luaL_checkstring','lua_pushstring')
+
+cpp.cpp_type('int').spelling += ['unsigned', 'unsigned int']
+cpp.cpp_type('long').spelling.append('unsigned long')
 
 initialize_primitive(cpp.cpp_type('basic_string', templates=[cpp.cpp_type('char')]),
                                                 lua_context_builder,

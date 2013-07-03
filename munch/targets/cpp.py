@@ -9,7 +9,10 @@ qualtype_logger = logging.getLogger('QUALTYPE')
 qualtype_logger.disabled = True
 
 variable_logger = logging.getLogger('VARIABLE')
-#variable_logger.disabled = True
+variable_logger.disabled = True
+
+translation_logger = logging.getLogger('TRANSLATION')
+translation_logger.disabled = True
 
 class CppContext(object):
     def __init__(self):
@@ -86,7 +89,7 @@ class CppContextBuilder(object):
     def translate_method(self, original_method, context, append = False):
         logging.debug('Trying to translate method: ' + original_method.name)
         for tag, translator in self.method_translation:
-            logging.debug('\tTrying to match on rule: ' + tag)
+            translation_logger.debug('\tTrying to match on rule: ' + tag)
             translator(original_method, context)
 
         if append and original_method.translation:
@@ -139,8 +142,9 @@ class CppContextBuilder(object):
                     logging.debug('initializing: [%s] for item: %s ', tag, repr(item))
                     init(item, ctx)   
 
+
         logging.debug('TRANSLATION PHASE')                    
-        if translate:
+        if translate:            
             for item in data:
                 if type(item) == cpp_method:
                     self.translate_method(item, ctx, True)
@@ -178,7 +182,7 @@ def method_translation(trans_id, comparator, context_builder, before = None):
     def decorator(function):
         @wraps(function)
         def wrapped_method_translation(original_method, context):
-            logging.debug('\t\t ' + trans_id + ' matches? ' + str(comparator(original_method)))
+            translation_logger.debug('\t\t ' + trans_id + ' matches? ' + str(comparator(original_method)))
             if comparator(original_method):
                 function(original_method, context)
         
@@ -376,7 +380,7 @@ class cpp_if (cpp_block):
     if_str = 'if ({exprs}) {{ \n {body} }} {elseBlock}'
 
     def __init__(self, expr = [], body = []):
-        cpp_block.__init__(self)
+        cpp_block.__init__(self, expr)
         self.body = list(body)
         self.cpp_else = None
 
@@ -484,7 +488,12 @@ class cpp_variable(object):
             logging.debug("[CAST] equal objects, returning")
             return self.name
 
-        res_var = copy.deepcopy(self)
+        if not self.ctype.is_pointer() and not self.ctype.is_reference() and \
+            to_ctype.is_reference():
+            logging.debug("[CAST] is referenceable, returning")
+            return self.name
+
+        res_var = copy.copy(self)
 
         if to_ctype.is_pointer() and not self.ctype.is_pointer():
             res_var = cpp_reference(res_var)
@@ -730,13 +739,17 @@ class cpp_method(cpp_block):
     def __str__(self):
         assert(self.name)
         assert(self.returns)
-       
-        return cpp_method.body_str.format(return_type=self.returns,
+        try:
+            return cpp_method.body_str.format(return_type=self.returns,
                     static = 'static' if self.static else '', 
                     func_name=self.name,
                     param_list=','.join(map(str, self.parameters)),
                     body='\n'.join(map(lambda expr: str(expr) + (';' if not isinstance(expr, cpp_block) else ''),  self.exprs)),
                     return_value= '' if not self.return_value else str(self.return_value) + ';')
+        except Exception, e:
+            print 'Failed to process a method named:', self.name
+            print 'body:', self.exprs
+            raise e
 
 class cpp_class(object):
     cpp_class_str=\
@@ -760,12 +773,16 @@ class {ClassName} {Bases}
 
     def __str__(self):
         assert(self.name)
-        return cpp_class.cpp_class_str.format(ClassName = self.name,
-            Bases = '' if not self.bases else ':' + ','.join(map(str, self.bases)),
-            PublicDeclarations = '' if not self.public else 'public:\n' + '\n'.join(map(lambda item: str(item) + (';' if not isinstance(item, cpp_block) else ''), self.public)), 
-            ProtectedDeclarations = '' if not self.protected else 'protected:\n' + ';\n'.join(map(lambda item: str(item) + (';' if not isinstance(item, cpp_block) else ''), self.protected)),
-            PrivateDeclarations = '' if not self.private else 'private:\n' + ';\n'.join(map(lambda item: str(item) + (';' if not isinstance(item, cpp_block) else ''), self.private)),
-        )
+        try:
+            return cpp_class.cpp_class_str.format(ClassName = self.name,
+                Bases = '' if not self.bases else ':' + ','.join(map(str, self.bases)),
+                PublicDeclarations = '' if not self.public else 'public:\n' + '\n'.join(map(lambda item: str(item) + (';' if not isinstance(item, cpp_block) else ''), self.public)), 
+                ProtectedDeclarations = '' if not self.protected else 'protected:\n' + ';\n'.join(map(lambda item: str(item) + (';' if not isinstance(item, cpp_block) else ''), self.protected)),
+                PrivateDeclarations = '' if not self.private else 'private:\n' + ';\n'.join(map(lambda item: str(item) + (';' if not isinstance(item, cpp_block) else ''), self.private)),
+            )
+        except Exception, e:
+            print 'failed to process a class named: ' , self.name
+            raise e
 
 #we create a type to mach any other type
 class munch_any_type(cpp_qual_type):
