@@ -25,10 +25,12 @@ def process_functions(cls):
         #if there is only one function with this name, it's not an overload it safely
         if len(overloads[func]) == 1:
             overloads[func][0].is_overload = False
+            overloads[func][0].has_overload = False
             final_functions.append(overloads[func][0])
         else:
             newfun = cpp.cpp_method(func)
-            newfun.is_overload = True
+            newfun.has_overload = True
+            newfun.is_overload = False
             newfun.overloads = {
                 'by_arg_count' : [],
                 'by_lua_type' : [],
@@ -42,7 +44,9 @@ def process_functions(cls):
 
             for i, function in enumerate(overloads[func]):
                 function.name = '%s_overload_%d' % (function.name, overload_count)
-                function.is_overload = False
+                function.is_overload = True
+                function.has_overload = False
+                function.orig_name = newfun.name
                 overload_count += 1
 
                 #resolving functions that can be deduced by the count of it's arguments    
@@ -88,6 +92,17 @@ def process_functions(cls):
 
 lua_context_builder = cpp.CppContextBuilder()
 
+
+def make_var_identifier(variable):
+    variable.identifier = variable.name.replace('::', '_')\
+                                       .replace(' ', '')\
+                                       .replace('<','_')\
+                                       .replace('>', '_')\
+                                       .replace(',', '_')
+
+cpp.cpp_qual_type.hooks.append(make_var_identifier)
+
+
 #preprocessing. Handling overloads for classes and stray functions
 @cpp.preprocess("preprocess", 
                     lua_context_builder)
@@ -100,32 +115,53 @@ def lua_preprocess(data, context):
 
     #resolving overloads
     for item in classes:
-        item.identifier_name = item.qualname.replace('::', '_')
+        item.identifier_name = item.qualname\
+                                        .replace('::', '_')\
+                                        .replace(' ', '')\
+                                        .replace('<','_')\
+                                        .replace('>', '_')\
+                                        .replace(',', '_')
         process_functions(item)
 
     #resolving dependencies
     sorted_classes = []
     class_set = set([])
 
+    previous_count = len(classes)
+    iteration = 0
+
     while classes:
         current = classes.pop(0)
         processed = True
         
-        print 'testing', current.name, current.dependencies
+        #print 'testing', current.name, current.dependencies
         for dependency in current.dependencies:
             if 'std' in dependency or dependency == current.qualname:
                 continue
 
-            if not dependency in class_set:
-                print 'I dont have dependency: ', dependency
+            #remove this once the generator knows how to get template items
+            if '<' in dependency:
+                templates = dependency[dependency.find('<') + 1:dependency.find('>')].split(',')
+                current.dependencies += templates
+
+            if not dependency in class_set and not iteration == 10:
+                #print 'I dont have dependency: ', dependency
                 classes.append(current)
                 processed = False
                 break 
 
         if processed:
-            print '### added', current.name
+            #print '### added', current.name
             sorted_classes.append(current)
             class_set.add(current.qualname)
+            iteration = 0
+
+        if previous_count == len(classes):            
+            if iteration == 10:
+                raise Exception("Couldn't resolve dependencies for the classes:" + str(classes))
+            iteration += 1
+
+        previous_count = len(classes)
 
     fake_cls = cpp.cpp_class('Fake')
     fake_cls.public = functions
@@ -161,7 +197,7 @@ def init_translated_class(orig_class, context):
 
     logging.debug('baking methods for class: %s : %s' % (orig_class.name ,orig_class.public))
     
-    lua_cls.public.append(make_getter(orig_class))
+    #lua_cls.public.append(make_getter(orig_class))
     
     #we now bake all methods and subclasses from this class, but not preprocess them
     class_ctx = lua_context_builder.bake(orig_class.public, preprocess=False)
@@ -244,7 +280,7 @@ def init_translated_method(orig_method, context):
     orig_method.translation = method
 
 @cpp.method_translation("overload_arg_count", 
-                        lambda orig_method: orig_method.is_overload \
+                        lambda orig_method: orig_method.has_overload \
                                             and orig_method.overloads['by_arg_count'],
                         lua_context_builder)
 def process_overload_by_arg_count(orig_method, context):
@@ -293,13 +329,13 @@ def process_virtual_function_callback(orig_method, context):
     orig_method.translation.parent.public.append(lua_method)
 
 @cpp.method_translation("overloaded_function",
-                        lambda orig_method: orig_method.is_overload,
+                        lambda orig_method: orig_method.has_overload,
                         lua_context_builder)
 def process_main_overloaded_function(function, context):
     function.translation.exprs += function.translation.execution
 
 @cpp.method_translation("default_function",
-                        lambda orig_method: not orig_method.is_overload,
+                        lambda orig_method: not orig_method.has_overload,
                         lua_context_builder)
 def process_function(function, context):    
     method = function.translation
@@ -327,11 +363,11 @@ def process_function(function, context):
     if function.parent and not function.is_constructor:
         if function.is_virtual:
             cif = cpp.cpp_if(['lua_self != nullptr'])
-            cif.body.append('lua_self = lua_munch_%s::get(L, 1)' % (function.parent.identifier_name))
+            cif.body.append('lua_self = static_cast<{}*>(lua_touserdata(L, 1))'.format(function.parent.qualname))
 
             method.recover.append(cif)
         else:
-            method.initialization.append('{0}* lua_self = lua_munch_{1}::get(L, 1)'.format(function.parent.qualname, function.parent.identifier_name))
+            method.initialization.append('{0}* lua_self = static_cast<{1}*>(lua_touserdata(L, 1))'.format(function.parent.qualname, function.parent.qualname))
 
     for parameter in function.parameters:
         method.recover.append(lua_context_builder.apply_variable_conversion_from_target(parameter, context))
@@ -343,12 +379,14 @@ def process_function(function, context):
 
     if function.is_constructor:
         method.execution.append('{0}* lua_self = new {0}({1})'.format(function.parent.qualname,
-                                                                      ','.join([param.name for param in function.parameters])))
+                                                                      ','.join(map(str,applied_parameters))))
         method.execution.append('lua_pushlightuserdata(L, (void*) lua_self)')
         method.return_value = cpp.cpp_return(1)
     else:    
         #then we call the original method!
-        method.execution.append(cpp.cpp_method_call(function.name if not function.parent else 'lua_self->' + function.name, applied_parameters))
+        fname = function.name if not function.is_overload else function.orig_name
+
+        method.execution.append(cpp.cpp_method_call(fname if not function.parent else 'lua_self->' + fname, applied_parameters))
 
         if function.returns != cpp.cpp_type('void'):
             logging.debug('lua_return: translating variable %r to LUA', function.returns)
@@ -408,6 +446,8 @@ initialize_primitive(cpp.cpp_type('float'), lua_context_builder, 'LUA_TNUMBER','
 initialize_primitive(cpp.cpp_type('double'), lua_context_builder,'LUA_TNUMBER','luaL_checknumber','lua_pushnumber')
 initialize_primitive(cpp.cpp_type('bool'), lua_context_builder, 'LUA_TBOOLEAN','lua_toboolean','lua_pushboolean')
 initialize_primitive(cpp.cpp_type('char', pointer=True), lua_context_builder, 'LUA_TSTRING','luaL_checkstring','lua_pushstring')
+initialize_primitive(cpp.cpp_type('char'), lua_context_builder, 'LUA_TSTRING','*luaL_checkstring','lua_pushstring')
+initialize_primitive(cpp.cpp_type('unsigned char', pointer=True), lua_context_builder, 'LUA_TSTRING','(const unsigned char*) luaL_checkstring','lua_pushstring')
 
 cpp.cpp_type('int').spelling += ['unsigned', 'unsigned int']
 cpp.cpp_type('long').spelling.append('unsigned long')
@@ -423,12 +463,19 @@ string = cpp.cpp_type('basic_string', templates=[cpp.cpp_type('char')])
 string.spelling.append('std::basic_string<char>')
 string.spelling.append('std::string')
 
-#overrinding the default variable initialization for std::string
-@cpp.variable_initialization(cpp.cpp_type('basic_string', templates=[cpp.cpp_type('char')]),
+#overrinding the default variable initialization for float, we need a double
+@cpp.variable_initialization(cpp.cpp_type('float'),
                              lambda item: True,
                              lua_context_builder)
-def string_initializer(variable, ctype):
-    return cpp.cpp_variable(variable.name, cpp.cpp_type('char', pointer=True))
+def float_initializer(variable, ctype):
+    return cpp.cpp_variable(variable.name, cpp.cpp_type('float'))
+
+@cpp.variable_conversion_to_target_language(cpp.cpp_type('basic_string',
+                                                          templates=[cpp.cpp_type('char')]),
+                             lambda item: True,
+                             lua_context_builder)
+def string_to_lua(variable, ctype):
+    return 'lua_pushstring(L, %s.c_str())' %(variable.name)
 
 @cpp.variable_check(cpp.MUNCH_ANY_TYPE, 
                     lambda item: True,
@@ -448,13 +495,21 @@ def anytype_initializer(variable, ctype):
                     lambda item: True,
                     lua_context_builder)
 def anytype_variable_get(variable, ctype):
-    return '%s = lua_munch_%s::get(L, %d)' % (variable.name, variable.ctype.name.replace('::','_'), variable.index)
+    var = cpp.cpp_variable('lua_touserdata(L,{})'.format(variable.index), cpp.cpp_type('void', pointer=True))
+
+    print "from_lang cast:", var.cast(cpp.cpp_static_cast, variable.ctype.mutate(pointer=True))
+    return '%s = %s' % (variable.name, var.cast(cpp.cpp_static_cast, variable.ctype.mutate(pointer=True)))
 
 @cpp.variable_conversion_to_target_language(cpp.MUNCH_ANY_TYPE,
                     lambda item: True,
                     lua_context_builder)
 def anytype_variable_set(variable, ctype):
-    return 'lua_pushlightuserdata(L, %s)' % (variable.cast(cpp.cpp_static_cast, cpp.cpp_type('void', pointer=True)))
+    refvar = variable
+
+    if not variable.ctype.is_pointer():        
+        return 'lua_pushlightuserdata(L, %s)' % (cpp.cpp_static_cast(cpp.cpp_type('void', pointer=True), 'new {}({})'.format(variable.ctype.name, variable.name)))
+
+    return 'lua_pushlightuserdata(L, %s)' % (refvar.cast(cpp.cpp_static_cast, cpp.cpp_type('void', pointer=True)))
 
 def anytype_variable_dereference(variable, ctype):
     return cpp.cpp_dereference(variable.name)

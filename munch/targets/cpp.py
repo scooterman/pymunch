@@ -24,10 +24,10 @@ class CppContextBuilder(object):
         self.method_translation = []
         self.class_translation = []
         self.preprocess = []
-        self.variable_initializers = []
-        self.variable_checkers = []
-        self.var_from_target = []
-        self.var_to_target = []
+        self.variable_initializers = {}
+        self.variable_checkers = {}
+        self.var_from_target = {}
+        self.var_to_target = {}
 
         self.initializer_matcher = {}
         self.var_to_target_matcher = {}
@@ -64,7 +64,7 @@ class CppContextBuilder(object):
         matcher, items = self.get_matcher_list(matcher_name)
 
         #we set the best match for @ctype iterating over all items from a list and getting it's proximity values
-        heights = map(lambda item: (item[0], item[0].conforms_match(ctype)), items)
+        heights = map(lambda _ctype: (_ctype, _ctype.conforms_match(ctype)), items)
         heights.sort(reverse=True, cmp=lambda a, b: a[1] - b[1])
         
         logging.debug('Building matcher for %r on list %s. Matched: %r with height %d', ctype, matcher_name, heights[0][0], heights[0][1])
@@ -107,22 +107,22 @@ class CppContextBuilder(object):
         return in_cls.translation
 
     def apply_variable_initialization(self, in_var, context):
-        for ctype, trans in self.variable_initializers:
+        for ctype, trans in self.variable_initializers.iteritems():
             res = trans(in_var, context)
             if res: return res
 
     def apply_variable_check(self, in_var, context):
-        for ctype, trans in self.variable_checkers:
+        for ctype, trans in self.variable_checkers.iteritems():
             res = trans(in_var, context)
             if res: return res
 
     def apply_variable_conversion_to_target(self, in_var, context):
-        for ctype, trans in self.var_to_target:
+        for ctype, trans in self.var_to_target.iteritems():
             res = trans(in_var, context)
             if res: return res
 
     def apply_variable_conversion_from_target(self, in_var, context):
-        for ctype, trans in self.var_from_target:
+        for ctype, trans in self.var_from_target.iteritems():
             res = trans(in_var, context)
             if res: return res
 
@@ -235,7 +235,8 @@ def variable_initialization(ctype, comparator, context_builder):
 
             return False
 
-        context_builder.variable_initializers.append((ctype, wrapped_variable_initialization))
+        context_builder.variable_initializers[ctype] = wrapped_variable_initialization
+
         return wrapped_variable_initialization
 
     return decorator
@@ -258,7 +259,7 @@ def variable_check(ctype, comparator, context_builder):
             variable_logger.debug("\tNot matched.")
             return False
 
-        context_builder.variable_checkers.append((ctype, wrapped_variable_check))
+        context_builder.variable_checkers[ctype] = wrapped_variable_check
         return wrapped_variable_check
 
     return decorator
@@ -279,7 +280,7 @@ def variable_conversion_from_target_language(ctype, comparator, context_builder)
             variable_logger.debug("\tNot matched.")
             return False
 
-        context_builder.var_from_target.append((ctype, wrapped_variable_conversion_from_target_language))
+        context_builder.var_from_target[ctype] = wrapped_variable_conversion_from_target_language
 
         return wrapped_variable_conversion_from_target_language
 
@@ -300,7 +301,7 @@ def variable_conversion_to_target_language(ctype, comparator, context_builder):
             variable_logger.debug("\tNot matched.")
             return False
 
-        context_builder.var_to_target.append((ctype, wrapped_variable_conversion_to_target_language))
+        context_builder.var_to_target[ctype] = wrapped_variable_conversion_to_target_language
 
         return wrapped_variable_conversion_to_target_language
     return decorator
@@ -327,9 +328,8 @@ class cpp_dereference(object):
         return '< dereference >'
 
     def __str__(self):
-        assert self.expr
-        assert type(self.expr) == cpp_variable or type(self.exr) == str
-        return '*' + str(self.expr.name)
+        assert self.expr != None        
+        return '*' + str(self.expr)
 
 class cpp_reference(object):
     def __init__(self, expr):
@@ -339,9 +339,8 @@ class cpp_reference(object):
         return '< reference >'
 
     def __str__(self):
-        assert self.expr
-        assert type(self.expr) == cpp_variable or type(self.exr) == str
-        return '&' + str(self.expr.name)
+        assert self.expr != None
+        return '&' + str(self.expr)
 
 class cpp_and:
     def __init__(self, expr = []):
@@ -493,18 +492,28 @@ class cpp_variable(object):
             logging.debug("[CAST] is referenceable, returning")
             return self.name
 
-        res_var = copy.copy(self)
+        res_var = self.name
 
-        if to_ctype.is_pointer() and not self.ctype.is_pointer():
-            res_var = cpp_reference(res_var)
+        if self.ctype.name == to_ctype.name:
+            if to_ctype.is_pointer():
+                if not self.ctype.is_pointer():
+                    res_var = cpp_reference(res_var)
 
-        elif to_ctype.is_reference() and self.ctype.is_pointer():
-            res_var = cpp_dereference(res_var)
+            if to_ctype.is_reference() or not to_ctype.is_pointer():
+                if self.ctype.is_pointer():
+                    res_var = cpp_dereference(res_var)
         else:
-            res_var = res_var.name
+            if to_ctype.is_pointer():
+                if not self.ctype.is_pointer():
+                    res_var = cast_class(to_ctype, cpp_reference(res_var))
+                if self.ctype.is_pointer():
+                    res_var = cast_class(to_ctype, res_var)
 
-        logging.debug("[CAST] result expression: %r" % (res_var))
-        return cast_class(to_ctype, res_var)
+            if to_ctype.is_reference() or not to_ctype.is_pointer():
+                if self.ctype.is_pointer():
+                    res_var = cpp_dereference(res_var)
+
+        return res_var
 
     def __str__(self):
         assert(self.ctype)
@@ -605,6 +614,8 @@ class cpp_qual_type(object):
     bitflag_const = 4
     bitflag_reference = 8
 
+    hooks = []
+
     def __init__(self, name, pointer=False, static=False, const=False, reference=False, templates=[], spelling=[]):
         self.name = name
         self.templates = list(templates)
@@ -618,6 +629,8 @@ class cpp_qual_type(object):
         self.variable_dereference = None
 
         self.update_bitflags(pointer, static, const, reference)
+
+        map(lambda hook: hook(self), cpp_qual_type.hooks)
 
     def is_pointer(self):
         return cpp_qual_type.bitflag_pointer & self._bitflags 
@@ -655,7 +668,7 @@ class cpp_qual_type(object):
         return cpp_type(self.name, pointer, static, const, reference, templates, spelling)
 
     def __hash__(self):        
-        return self.hash
+        return id(self)
 
     def __eq__(self, other):
         qualtype_logger.debug('QUALTYPE __eq__: %r[%s, %d] == %r[%s, %d]' %(self, self.name, self._bitflags, other, other.name, other._bitflags))
