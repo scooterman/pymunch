@@ -175,12 +175,12 @@ def lua_preprocess(data, context):
     data += sorted_classes + fake_cls.public + other
 
     context.binder_method = cpp.cpp_method('luaopen_gdx',
-                returns=cpp.cpp_type('void'),
+                returns=cpp.cpp_type('int'),
                 attributes=['extern', '"C"'],
                 params=[cpp.cpp_variable('L', cpp.cpp_type('lua_State', pointer=True))])
     context.luareg_declarations = []
-
     context.binder_method.exprs.append('lua_newtable(L)')
+    context.binder_method.return_value = cpp.cpp_return(1)
 
 def make_binder(orig_class, lua_cls):
     cls_type = cpp.cpp_type('void')
@@ -220,7 +220,7 @@ def init_translated_class(orig_class, context):
         else:
             lua_cls.protected.append(item)
 
-        if type(item) == cpp.cpp_method and not item.is_constructor and item.public:
+        if type(item) == cpp.cpp_method and item.public:
             luaReg.expr.append('{ "%s" , lua_munch_%s::%s }' % (item.orig_name, orig_class.identifier_name, item.name))    
 
     lua_cls.public.append(make_binder(orig_class, lua_cls))
@@ -253,8 +253,10 @@ def init_translated_class(orig_class, context):
 
     context.binder_method.exprs.append('{}::bind(L)'.format(lua_cls.name))
     
+    luaReg.parent = lua_cls
+
     vardecl = luaReg.define()
-    vardecl = vardecl.replace('static', '').replace('constexpr', '')
+    vardecl = vardecl.replace('static', '')
 
     context.luareg_declarations.append(vardecl)
 

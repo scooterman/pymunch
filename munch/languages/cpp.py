@@ -191,7 +191,8 @@ class cpp_variable(object):
         return cpp_dereference(self)
 
     def define(self):
-        return self.ctype.define() + ' ' + self.name
+        print 'parenteee', self.parent, ('' if not self.parent else self.parent.name + '::') + self.name
+        return self.ctype.define() + ' ' + ('' if not self.parent else self.parent.name + '::') + self.name
 
     #casts this variable to another ctype
     #returns a cast_class object with all convertions made
@@ -236,7 +237,7 @@ class cpp_variable(object):
         assert(self.ctype)
         assert(self.name)
 
-        return ('%s %s %s' % (self.ctype,  self.name, '' if self.expr == None else '= %s' % str(self.expr))).strip()
+        return ('%s %s %s' % (self.ctype, ('' if not self.parent else self.parent.name + '::') + self.name, '' if self.expr == None else '= %s' % str(self.expr))).strip()
 
 class cpp_static_cast(object):
     def __init__(self, ctype_to_cast, expression):
@@ -281,7 +282,7 @@ class cpp_variable_array(object):
         assert(self.name)
 
         return '{} {} {}'.format(self.ctype,
-                                 self.name,
+                                 ('' if not self.parent else self.parent.name + '::') + self.name,
                                  '' if self.expr == None else '[{}]'.format(len(self.expr)))       
 
     def __str__(self):
