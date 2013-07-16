@@ -7,3 +7,11 @@ def apply_pipeline(lst, *items):
 		items  = applicable(*items)
 
 	return items
+
+def flatten(exprs, prepend = '', append = lambda expr: str(expr)):
+    if type(exprs) is None:
+        return ''
+    if type(exprs) != list:
+        return str(exprs)
+
+    return prepend.join(map(lambda expr: '' if expr is None else (append(expr) if type(expr) != list else flatten(expr, append)), exprs))

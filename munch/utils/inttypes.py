@@ -1,5 +1,5 @@
 
-from munch.targets import cpp
+from munch.languages import cpp
 
 inttype = cpp.cpp_type('int')
 inttype.spelling += ['int32_t', 'uint32_t']
