@@ -1,6 +1,7 @@
 import logging
 from munch.utils.memoize import memoize
-from munch.utils import flatten
+from munch.utils import flatten, visitable
+
 import traceback
 
 flatten_block = lambda expr: str(expr) + ';\n' if not isinstance(expr, cpp_block) else '\n'
@@ -8,19 +9,47 @@ flatten_block = lambda expr: str(expr) + ';\n' if not isinstance(expr, cpp_block
 qualtype_logger = logging.getLogger('QUALTYPE')
 qualtype_logger.disabled = True
 
-class cpp_assignment(object):
-    def __init__(self, expr_a, expr_b):
-        self.expr_a = expr_a
-        self.expr_b = expr_b
+
+@visitable.visitable
+class cpp_expr(object):
+    '''
+        cpp_expr is the basic block of any cpp construct. Will hold the things that are 
+        basic to all structures
+    '''
+    def __init__(self, expr):
+        self.expr = expr
+
+@visitable.visitable
+class cpp_binop(cpp_expr):
+    '''
+        Will hold a basic 2-ary expressions
+    '''
+    def __init__(self, lhs, rhs):
+        self.lhs = cpp_expr(lhs)
+        self.rhs = cpp_expr(rhs)
+
+@visitable.visitable
+class cpp_block(cpp_expr):
+    '''
+        Will hold a basic N-ary set of expressions
+    '''
+    def __init__(self, exprs = []):
+        self.exprs = list(exprs)
 
     def __repr__(self):
+        return '< block expression of size %d >' % len(self.exprs)
+
+@visitable.visitable
+class cpp_scope(cpp_block):
+    '''
+        An scope is a block that opens a new context, usually with {}'s
+    '''
+    pass
+
+@visitable.visitable
+class cpp_assignment(cpp_binop):
+    def __repr__(self):
         return '< assignment >'
-
-    def __str__(self):
-        assert(self.expr_a is not None)
-        assert(self.expr_b is not None)
-
-        return flatten(self.expr_a) + ' = ' + flatten(self.expr_b)
 
 class cpp_dereference(object):
     def __init__(self, expr):
@@ -65,34 +94,16 @@ class cpp_or:
         assert(self.exprs)
         return ' || ('.join(flatten(self.exprs)) + ')'
 
-class cpp_block(object):
-    def __init__(self, exprs = []):
-        self.exprs = list(exprs)
-
-    def __repr__(self):
-        return '< block expression of size %d >' % len(self.exprs)
-
-    def __str__(self):
-        assert(self.exprs)
-        return '{%s}' % flatten(self.expr)
-
-class cpp_if (cpp_block):
-    if_str = 'if ({exprs}) {{ \n {body} }} {elseBlock}'
-
+@visitable.visitable
+class cpp_if (cpp_scope):
     def __init__(self, expr = [], body = []):
-        cpp_block.__init__(self, expr)
-        self.body = list(body)
+        cpp_scope.__init__(self, body)
+        self.if_exprs = list(expr)
+
         self.cpp_else = None
 
     def __repr__(self):
         return '< if expression >'
-
-    def __str__(self):
-        assert(self.exprs)
-
-        return cpp_if.if_str.format(exprs = flatten(self.exprs, '', lambda expr: str(expr) + '\n'),
-                             body = flatten(self.body, ';', lambda expr: str(expr) + '\n'),
-                             elseBlock = '' if not self.cpp_else else ' else ' + str(self.cpp_else))
 
 class cpp_return(object):
     def __init__(self, expr):
