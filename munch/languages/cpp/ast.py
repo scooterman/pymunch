@@ -20,6 +20,14 @@ class cpp_expr(object):
         self.expr = expr
 
 @visitable.visitable
+class cpp_expr_list(list):
+    '''
+        cpp_expr_list contains a list of expressions
+    '''
+    def __init__(self, *exprs):
+        self.extend(map(lambda item: item if isinstance(item, cpp_expr) or isinstance(item, cpp_expr_list) else cpp_expr(item), exprs))
+
+@visitable.visitable
 class cpp_binop(cpp_expr):
     '''
         Will hold a basic 2-ary expressions
@@ -29,13 +37,10 @@ class cpp_binop(cpp_expr):
         self.rhs = cpp_expr(rhs)
 
 @visitable.visitable
-class cpp_block(cpp_expr):
+class cpp_block(cpp_expr_list):
     '''
         Will hold a basic N-ary set of expressions
     '''
-    def __init__(self, exprs = []):
-        self.exprs = list(exprs)
-
     def __repr__(self):
         return '< block expression of size %d >' % len(self.exprs)
 
@@ -51,131 +56,89 @@ class cpp_assignment(cpp_binop):
     def __repr__(self):
         return '< assignment >'
 
-class cpp_dereference(object):
-    def __init__(self, expr):
-        self.expr = expr
-
+@visitable.visitable
+class cpp_indirection(cpp_expr):
     def __repr__(self):
-        return '< dereference >'
+        return '< indirection  >'
 
-    def __str__(self):
-        assert self.expr != None        
-        return '*(' + str(self.expr) + ')'
-
-class cpp_reference(object):
-    def __init__(self, expr):
-        self.expr = expr
-
+@visitable.visitable
+class cpp_reference(cpp_expr):
     def __repr__(self):
         return '< reference >'
 
-    def __str__(self):
-        assert self.expr != None
-        return '&(' + str(self.expr) + ')'
-
-class cpp_and:
-    def __init__(self, expr = []):
-        self.exprs = list(expr)
-
+@visitable.visitable
+class cpp_and(cpp_expr_list):
     def __repr__(self):
         return '< and expression >'
 
-    def __str__(self):
-        assert(self.exprs)
-        return ' && ('.join(flatten(self.exprs)) + ')'
-
-class cpp_or:
-    def __init__(self, expr = []):
-        self.exprs = list(expr)
+@visitable.visitable
+class cpp_or(cpp_expr_list):
     def __repr__(self):
         return '< or expression >'
 
-    def __str__(self):
-        assert(self.exprs)
-        return ' || ('.join(flatten(self.exprs)) + ')'
-
 @visitable.visitable
 class cpp_if (cpp_scope):
-    def __init__(self, expr = [], body = []):
-        cpp_scope.__init__(self, body)
-        self.if_exprs = list(expr)
+    def __init__(self, if_exprs, *body):
+        assert type(if_exprs == cpp_expr_list)
+        if body:
+            assert type(body == cpp_block)        
+            cpp_scope.__init__(self, *body)
 
-        self.cpp_else = None
+        self.if_exprs = if_exprs
 
     def __repr__(self):
         return '< if expression >'
 
-class cpp_return(object):
-    def __init__(self, expr):
-        self.expr = expr
-
+@visitable.visitable
+class cpp_return(cpp_expr):
     def __repr__(self):
         return '< return expression  >'
 
-    def __str__(self):
-        assert(self.expr != None)
-        return 'return %s' % str(self.expr)
-
-class cpp_case(object):
-    case_str=\
-'''
-case {expr}:
-    {body}
-    {Break}
-'''
-    def __init__(self, expr = None, body = []):
-        self.expr = expr
-        self.body = list(body)
-        self.parent = None
+@visitable.visitable
+class cpp_case(cpp_block):
+    def __init__(self, expr, *body):
+        assert (expr)
+        self.expr = cpp_expr(expr)
+        cpp_block.__init__(self, *body)
 
     def __repr__(self):
         return '< case expression >'
 
-    def __str__(self):
-        assert(self.expr != None)
-        return cpp_case.case_str.format(expr=str(self.expr),
-                            body= flatten(self.body, ';', lambda expr: str(expr) + '\n'),
-                            Break='break;' if self.body and type(self.body[-1]) != cpp_return else '').strip()
+@visitable.visitable
+class cpp_case_scoped(cpp_scope):
+    def __init__(self, expr, *body):
+        assert (expr)
+        self.expr = cpp_expr(expr)
+        cpp_scope.__init__(self, *body)
 
-class cpp_case_default(object):
-    default_str=\
-'''
-default:
-    {body}
-    break;
-'''
-    def __init__(self, body = []):
-        self.body = list(body)
-        self.parent = None
+    def __repr__(self):
+        return '< case expression (scoped) >'
+
+@visitable.visitable
+class cpp_break(cpp_expr):
+    def __init__(self):
+        cpp_expr.__init__(self, 'break')
+
+    def __repr__(self):
+        return '< break expression >'
+
+@visitable.visitable
+class cpp_default(cpp_expr):
+    def __init__(self, body):
+        cpp_expr.__init__(self, 'default')
+        self.body = body
 
     def __repr__(self):
         return '< case default expression >'
 
-    def __str__(self):
-        return cpp_case_default.case_str.format(body=flatten(self.body, ';', lambda expr: str(expr) + '\n'))
-
-class cpp_switch (cpp_block):
-    switch_str=\
-'''
-switch({switch_expr}) {{
-{case_exprs}
-{default}
-}}
-'''
-    def __init__(self, switch_expr, case_exprs = [], default = ''):
-        self.switch_expr = switch_expr
-        self.exprs = list(case_exprs)
-        self.default = str(default)
-        self.parent = None
+@visitable.visitable
+class cpp_switch (cpp_scope):
+    def __init__(self, switch_expr, *exprs):
+        self.switch_expr = cpp_expr(switch_expr)
+        cpp_scope.__init__(self, *exprs)
 
     def __repr__(self):
         return '< switch expression >'
-
-    def __str__(self):
-        assert(self.switch_expr)
-        return cpp_switch.switch_str.format(switch_expr=str(self.switch_expr), 
-            case_exprs=flatten(self.exprs, '', lambda expr: str(expr) + '\n'),
-            default=self.default)
 
 class cpp_variable(object):
     def __init__(self, name, ctype, expr = None):
