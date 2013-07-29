@@ -41,15 +41,12 @@ class cpp_block(cpp_expr_list):
     '''
         Will hold a basic N-ary set of expressions
     '''
-    def __repr__(self):
-        return '< block expression of size %d >' % len(self.exprs)
+    def __init__(self, *exprs, **kwargs):
+        cpp_expr_list.__init__(self, *exprs)
+        self.scoped = 'scoped' in kwargs and kwargs['scoped']
 
-@visitable.visitable
-class cpp_scope(cpp_block):
-    '''
-        An scope is a block that opens a new context, usually with {}'s
-    '''
-    pass
+    def __repr__(self):
+        return '< block expression of size %d >' % len(self)
 
 @visitable.visitable
 class cpp_assignment(cpp_binop):
@@ -77,13 +74,11 @@ class cpp_or(cpp_expr_list):
         return '< or expression >'
 
 @visitable.visitable
-class cpp_if (cpp_scope):
+class cpp_if (cpp_block):
     def __init__(self, if_exprs, *body):
         assert type(if_exprs == cpp_expr_list)
-        if body:
-            assert type(body == cpp_block)        
-            cpp_scope.__init__(self, *body)
-
+        assert type(body == cpp_block)        
+        cpp_block.__init__(self, *body, scoped=True)
         self.if_exprs = if_exprs
 
     def __repr__(self):
@@ -96,23 +91,13 @@ class cpp_return(cpp_expr):
 
 @visitable.visitable
 class cpp_case(cpp_block):
-    def __init__(self, expr, *body):
+    def __init__(self, expr, *body, **kwargs):
         assert (expr)
+        cpp_block.__init__(self, *body,**kwargs)
         self.expr = cpp_expr(expr)
-        cpp_block.__init__(self, *body)
 
     def __repr__(self):
         return '< case expression >'
-
-@visitable.visitable
-class cpp_case_scoped(cpp_scope):
-    def __init__(self, expr, *body):
-        assert (expr)
-        self.expr = cpp_expr(expr)
-        cpp_scope.__init__(self, *body)
-
-    def __repr__(self):
-        return '< case expression (scoped) >'
 
 @visitable.visitable
 class cpp_break(cpp_expr):
@@ -123,24 +108,49 @@ class cpp_break(cpp_expr):
         return '< break expression >'
 
 @visitable.visitable
-class cpp_default(cpp_expr):
-    def __init__(self, body):
-        cpp_expr.__init__(self, 'default')
-        self.body = body
+class cpp_default(cpp_case):
+    def __init__(self, *body, **kwargs):
+        cpp_case.__init__(self, cpp_expr('default'), *body, **kwargs)
 
     def __repr__(self):
         return '< case default expression >'
 
 @visitable.visitable
-class cpp_switch (cpp_scope):
+class cpp_switch (cpp_block):
     def __init__(self, switch_expr, *exprs):
         self.switch_expr = cpp_expr(switch_expr)
-        cpp_scope.__init__(self, *exprs)
+        cpp_block.__init__(self, *exprs, scoped=True)
 
     def __repr__(self):
         return '< switch expression >'
 
-class cpp_variable(object):
+@visitable.visitable
+class cpp_for (cpp_block):
+    def __init__(self, init_expr, compare_expr, inc_expr, *body , **kwargs):
+        self.init_expr = cpp_expr(init_expr)
+        self.compare_expr = cpp_expr(compare_expr)
+        self.inc_expr = cpp_expr(inc_expr)
+
+        cpp_block.__init__(self, *body, **kwargs)
+
+    def __repr__(self):
+        return '< for expression >'
+
+@visitable.visitable
+class cpp_var_declaration(cpp_expr):
+    '''
+        Declares a variable. 
+            This can accept a qualification (if the variable has a parent or namespace)
+    '''
+    def __init__(self, variable, qualified=False):
+        self.variable = variable
+        self.qualified = qualified
+
+    def __repr__(self):
+        return '< variable declaration: %r > ' % self.variable
+
+@visitable.visitable
+class cpp_variable(cpp_expr_list):
     def __init__(self, name, ctype, expr = None):
         self.name = name
         self.expr = expr
@@ -162,7 +172,7 @@ class cpp_variable(object):
         return cpp_reference(self)
 
     def dereference(self):
-        return cpp_dereference(self)
+        return cpp_indirection(self)
 
     def define(self):
         print 'parenteee', self.parent, ('' if not self.parent else self.parent.name + '::') + self.name
@@ -277,27 +287,22 @@ def cpp_type_internal(*args, **kwargs):
 def cpp_type(name, pointer=False, static=False, const=False, reference=False, templates=[], spelling=[]):
     return cpp_type_internal(name, pointer, static, const, reference, templates, spelling)
 
-class cpp_qual_type(object):
+@visitable.visitable
+class cpp_qual_type(cpp_expr):
     bitflag_static = 1
     bitflag_pointer = 2
     bitflag_const = 4
     bitflag_reference = 8
+    bitflag_constexpr = 16
 
     hooks = []
-
-    def __init__(self, name, pointer=False, static=False, const=False, reference=False, templates=[], spelling=[]):
+    def __init__(self, name, pointer=False, static=False, const=False, reference=False, constexpr=False, templates=[], spelling=[], parent=None):
         self.name = name
         self.templates = list(templates)
         self.spelling = list(spelling)
         self._bitflags = 0
-        self.initializer = None
-        self.type_check = None
-        self.variable_get = None
-        self.variable_set = None
-        self.type_conversion = None
-        self.variable_dereference = None
-
-        self.update_bitflags(pointer, static, const, reference)
+        self.parent = parent
+        self.update_bitflags(pointer, static, const, reference, constexpr)
 
         map(lambda hook: hook(self), cpp_qual_type.hooks)
 
@@ -312,6 +317,9 @@ class cpp_qual_type(object):
 
     def is_reference(self):
         return bool(cpp_qual_type.bitflag_reference & self._bitflags)
+
+    def is_constexpr(self):
+        return bool(cpp_qual_type.bitflag_constexpr & self._bitflags)
 
     #returns the qualifiers for the current ctype, nested to the deepest
     #item
@@ -360,13 +368,14 @@ class cpp_qual_type(object):
 
         return val
    
-    def update_bitflags(self, pointer, static, const, reference):
+    def update_bitflags(self, pointer, static, const, reference, constexpr):
         attr = 0        
         qualtype_logger.debug('QUALTYPE update bitflags for %r: %d %d %d %d', self, pointer, static, const, reference)
         attr |= cpp_qual_type.bitflag_static * int(static)
         attr |= cpp_qual_type.bitflag_pointer * int(pointer)
         attr |= cpp_qual_type.bitflag_const * int(const)
         attr |= cpp_qual_type.bitflag_reference * int(reference)
+        attr |= cpp_qual_type.bitflag_constexpr * int(constexpr)
 
         qualtype_logger.debug('QUALTYPE bitflags for %r: %d' , self, attr)
         self._bitflags = attr

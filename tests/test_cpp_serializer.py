@@ -3,6 +3,7 @@ from munch.languages.cpp import serializer
 from munch.languages.cpp.ast import *
 
 serializer.CppSerializerVisitor.ident = '·'
+serializer.CppSerializerVisitor.ident_block = 1
 
 def test_expr():
     visitor = serializer.CppSerializerVisitor()
@@ -23,7 +24,7 @@ def test_assignment():
     assignment = cpp_assignment('a', 10)
     result = visitor.parse(assignment)
 
-    assert result == 'a = 10'
+    assert result == 'a·=·10'
 
 def test_empty_block():
     visitor = serializer.CppSerializerVisitor()
@@ -35,32 +36,35 @@ def test_empty_block():
 def test_block_oneliner():
     visitor = serializer.CppSerializerVisitor()
     block = cpp_block(cpp_assignment('x', '22.3f'))
-    result = visitor.parse(block)
 
-    assert result == 'x = 22.3f;'
+    result = visitor.parse(block)
+    
+    assert result == 'x·=·22.3f;'
 
 def test_block_multiline():
     visitor = serializer.CppSerializerVisitor()
     block = cpp_block(cpp_assignment('x', '22.3f'), 
                       cpp_assignment('y', '33'),
                       cpp_assignment('x', False))
+
     result = visitor.parse(block)
 
-    assert result == 'x = 22.3f;\ny = 33;\nx = false;'
+    assert result == 'x·=·22.3f;\ny·=·33;\nx·=·false;'
 
 def test_scope():
     visitor = serializer.CppSerializerVisitor()
-    block = cpp_scope()
+    block = cpp_block(scoped=True)
     result = visitor.parse(block)
 
     assert result == '{}'
 
 def test_scope_multiline():
     visitor = serializer.CppSerializerVisitor()
-    block = cpp_scope(cpp_assignment('coke', '2'))
+    block = cpp_block(cpp_assignment('coke', '2'), scoped=True)
+    
     result = visitor.parse(block)
-
-    assert result == '{\n·coke = 2;\n}'  
+    
+    assert result == '{\n·coke·=·2;\n}'  
 
 def test_cpp_if():
     visitor = serializer.CppSerializerVisitor()
@@ -72,7 +76,7 @@ def test_cpp_if():
 
 def test_cpp_if_scope():
     visitor = serializer.CppSerializerVisitor()
-    block = cpp_scope(cpp_if(cpp_expr(True)))
+    block = cpp_block(cpp_if(cpp_expr(True)), scoped=True)
 
     result = visitor.parse(block)
 
@@ -176,63 +180,117 @@ def test_return_1():
 
 def test_case():
     visitor = serializer.CppSerializerVisitor()
-    block = cpp_case(cpp_expr(10), cpp_block(cpp_assignment('a', 100), cpp_break()))
+    block = cpp_case(cpp_expr(10), cpp_assignment('a', 100), cpp_break())
 
     result = visitor.parse(block)
-    
-    assert result == 'case 10:\n·a = 100;\n·break;'
+    assert result == 'case 10:\n·a·=·100;\n·break;'
 
 def test_case_scope():
     visitor = serializer.CppSerializerVisitor()
-    block = cpp_case(cpp_expr(10), cpp_scope(cpp_assignment('a', 100), cpp_break()))
+    block = cpp_case(cpp_expr(10), cpp_assignment('a', 100), cpp_break(), scoped=True)
 
     result = visitor.parse(block)
-
-    assert result == 'case 10:{\n··a = 100;\n··break;\n}'
+    assert result == 'case 10:{\n··a·=·100;\n··break;\n}'
 
 def test_case_default():
     visitor = serializer.CppSerializerVisitor()
-    block = cpp_default(cpp_block(cpp_assignment('a', 100), cpp_break()))
+    block = cpp_default(cpp_assignment('a', 100), cpp_break())
 
     result = visitor.parse(block)
 
-    assert result == 'default:\n·a = 100;\n·break;'
+    assert result == 'default:\n·a·=·100;\n·break;'
 
 def test_switch():
     visitor = serializer.CppSerializerVisitor()
     block = cpp_switch('a', cpp_case(10, cpp_block(cpp_assignment('a', 100), cpp_break())))
 
     result = visitor.parse(block)
-    print result
-    assert result == 'switch(a){\n'
 
+    assert result == 'switch(a){\n·case 10:\n··a·=·100;\n··break;\n}'
+
+def test_for():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_for(cpp_expr('a = 0'), 'a < 100', 'a++', cpp_expr('printf("hi mom\\n")'))
+
+    result = visitor.parse(block)
+
+    assert result == 'for(a = 0;a < 100;a++)\n·printf("hi mom\\n");'
+
+def test_for_scoped():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_for(cpp_expr('a = 0'), 'a < 100', 'a++', cpp_expr('printf("hi mom\\n")'), scoped=True)
+
+    result = visitor.parse(block)
+
+    assert result == 'for(a = 0;a < 100;a++){\n·printf("hi mom\\n");\n}'
+
+def test_qualtype_1():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_qual_type('int')
+
+    result = visitor.parse(block)
+
+    assert result == 'int'
+
+def test_qualtype_2():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_qual_type('int', const=True)
+
+    result = visitor.parse(block)
+
+    assert result == 'const int'
+
+def test_qualtype_3():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_qual_type('int', static=True)
+
+    result = visitor.parse(block)
+
+    assert result == 'static int'
+
+def test_qualtype_4():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_qual_type('int', pointer=True)
+
+    result = visitor.parse(block)
+
+    assert result == 'int*'
+
+def test_qualtype_5():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_qual_type('int', reference=True)
+
+    result = visitor.parse(block)
+
+    assert result == 'int&'
+
+def test_qualtype_6():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_qual_type('int', static= True, reference=True)
+
+    result = visitor.parse(block)
+
+    assert result == 'static int&'
+
+def test_qualtype_7():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_qual_type('int', const=True, static= True, reference=True)
+
+    result = visitor.parse(block)
+
+    assert result == 'static const int&'
+
+def test_qualtype_8():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_qual_type('int')
+    block.parent = cpp_expr('test')
+
+    result = visitor.parse(block, qualified=True)
+
+    assert result == 'test::int'
 
 if __name__ == '__main__':
-    # test_expr()
-    # test_nested_expr()
-    # test_assignment()
-    # test_empty_block()
-    # test_block_oneliner()
-    # test_block_multiline()
-    # test_scope()
-    # test_scope_multiline()
-    # test_cpp_if()
-    # test_cpp_if_scope()
-    # test_cpp_indirection_1()
-    # test_cpp_indirection()
-    # test_cpp_reference()
-    # test_cpp_reference_1()
-    # test_cpp_and()
-    # test_cpp_and_1()
-    # test_cpp_and_2()
-    # test_cpp_or()
-    # test_cpp_or_1()
-    # test_cpp_or_2()
-    # test_return()
-    # test_return_1()
-    # test_case()
-    # test_case_scope()
-    # test_case_default()
-    test_switch()
-
-    # PAREI: remover o tipo scoped e converter para uma flag
+    g = globals()
+    for func in filter(lambda functions: 'test' in functions, globals()):
+        print 'testing:', func
+        g[func]()
