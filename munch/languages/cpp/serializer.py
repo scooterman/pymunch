@@ -27,13 +27,14 @@ class CppSerializerVisitor(CppVisitor):
 
     def visit_cpp_block(self, block, context, ident, **kwargs):
         ctx = []
-        CppVisitor.visit_cpp_block(self, block, ident = ident + (1 if block.scoped else 0), context=ctx, **kwargs)
+        ident = ident + (1 if block.scoped else 0)
+        CppVisitor.visit_cpp_block(self, block, ident = ident, context=ctx, **kwargs)
 
         if ctx:
             expr = string_semicolon(block, ctx)
             if block.scoped:
                 lblockident = self.get_ident(ident - 1)
-                context.append(lblockident + '{\n' + '\n'.join(expr) + '\n' + lblockident + '}')
+                context.append('{\n' + '\n'.join(expr) + '\n' + lblockident + '}')
             else:
                context.append('\n'.join(expr))
         elif block.scoped:
@@ -56,6 +57,7 @@ class CppSerializerVisitor(CppVisitor):
         expr.if_exprs.visit(self, ident = 0, context = exprs, **kwargs)
 
         body = []
+
         self.visit_cpp_block(expr, context = body, ident = ident , **kwargs)
 
         string = self.get_ident(ident) + 'if ({}) {}'.format(' '.join(exprs).strip(), ''.join(body))
@@ -106,10 +108,9 @@ class CppSerializerVisitor(CppVisitor):
         if isinstance(expr, ast.cpp_block) and not expr.scoped:
             scope.append('\n')
 
-        self.visit_cpp_block(expr, context=scope, ident= ident + 1, **kwargs)
+        self.visit_cpp_block(expr, context=scope, ident= ident + (1 if not expr.scoped else 0), **kwargs)
 
         context.append( self.get_ident(ident) + 'case {}:{}'.format(' '.join(exprs), ''.join(scope)))
-
 
     def visit_cpp_default(self, expr, context, ident, **kwargs):
         scope = []
@@ -174,14 +175,78 @@ class CppSerializerVisitor(CppVisitor):
     def visit_cpp_variable(self, expr, context, ident , **kwargs):
         context.append(self.get_ident(ident) + expr.name)
 
-    def visit_cpp_var_declaration(self, expr, context, ident, **kwargs):
+    def visit_cpp_var_declaration(self, expr, context, ident, qualified = False, **kwargs):
         parent = []
-        if expr.qualified and expr.parent:
-            expr.parent.visit(self, context=parent, ident=0, **kwargs)
+
+        if qualified and expr.variable.parent:
+            expr.variable.parent.visit(self, context=parent, ident=0, **kwargs)
+
+        parent.append(expr.variable.name)
 
         ctype = []
         expr.variable.ctype.visit(self, context = ctype, ident = 0, **kwargs)
 
-        ctype.append(expr.variable.name)
+        ctype.append('::'.join(parent))
 
         context.append(self.get_ident(ident) + ' '.join(ctype))
+
+    def visit_cpp_c_cast(self, expr, context, ident, **kwargs):
+        ctx = []
+        expr.ctype_to_cast.visit(self, context=ctx, ident=0, **kwargs)
+
+        expr_ctx = []
+        expr.expr.visit(self, context=expr_ctx, ident=0, **kwargs)
+
+        context.append('({})({})'.format(' '.join(ctx), ' '.join(expr_ctx)))
+
+    def visit_cpp_variable_array(self, expr, context, ident, **kwargs):
+        ctx = []
+        expr.variable.visit(self, context=ctx, ident=0, **kwargs)
+        context.append(' '.join(ctx))
+
+    def visit_cpp_variable_array_decl(self, expr, context, ident, **kwargs):
+        ctx = []
+
+        vardecl = ast.cpp_var_declaration(expr.array_var.variable)
+        vardecl.visit(self, context=ctx, ident=0, **kwargs)
+
+        context.append('{}[{}]'.format(' '.join(ctx), expr.array_var.length))
+
+    def visit_cpp_call(self, expr, context, ident, **kwargs):
+        ctx = []
+        for param in expr.params:
+            param.visit(self, context=ctx, ident=0,**kwargs)        
+
+        exprctx = []
+        expr.expr.visit(self, context=exprctx, ident=0,**kwargs)
+        context.append(self.get_ident(ident) + '{}({})'.format(''.join(exprctx), ','.join(ctx)))
+
+    def visit_cpp_method(self, expr, context, ident, **kwargs):
+        context.append(expr.name)
+
+    def visit_cpp_method_decl(self, expr, context, ident, **kwargs):
+        ctx = []
+
+        expr.method.returns.visit(self, context=ctx, ident=0, **kwargs)
+        ctx += expr.method.attributes
+        
+        parent = []
+        if expr.qualified and expr.method.parent:
+            expr.method.parent.visit(self, context=parent, ident=0, qualified=True, **kwargs)
+
+        parent.append(expr.method.name)
+        ctx.append('::'.join(parent))
+
+        lst = []
+        self.visit_cpp_expr_list(expr.method.parameters, context=lst, ident=0, **kwargs)
+
+        context.append('{}({})'.format(' '.join(ctx), ','.join(lst)))
+
+    def visit_cpp_method_def(self, expr, context, ident, **kwargs):
+        decl = []
+        self.visit_cpp_method_decl(expr, context=decl, ident=0, **kwargs)
+
+        body = []
+        self.visit_cpp_block(expr.method, context=body, ident=ident, **kwargs)
+
+        context.append('{}{}'.format(''.join(decl), ''.join(body)))

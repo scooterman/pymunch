@@ -190,7 +190,7 @@ def test_case_scope():
     block = cpp_case(cpp_expr(10), cpp_assignment('a', 100), cpp_break(), scoped=True)
 
     result = visitor.parse(block)
-    assert result == 'case 10:{\n··a·=·100;\n··break;\n}'
+    assert result == 'case 10:{\n·a·=·100;\n·break;\n}'
 
 def test_case_default():
     visitor = serializer.CppSerializerVisitor()
@@ -288,6 +288,130 @@ def test_qualtype_8():
     result = visitor.parse(block, qualified=True)
 
     assert result == 'test::int'
+
+def test_cpp_variable():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_variable('myvar', cpp_type('int'))
+    
+    result = visitor.parse(block)
+
+    assert result == 'myvar'
+
+def test_cpp_vardecl():
+    visitor = serializer.CppSerializerVisitor()
+    variable = cpp_variable('myvar', cpp_type('int'))
+    block = cpp_var_declaration(variable)
+    
+    result = visitor.parse(block)
+
+    assert result == 'int myvar'
+
+def test_cpp_vardecl_1():
+    visitor = serializer.CppSerializerVisitor()
+    variable = cpp_variable('myvar', cpp_type('int', pointer=True))
+    block = cpp_var_declaration(variable)
+    
+    result = visitor.parse(block)
+
+    assert result == 'int* myvar'
+
+def test_cpp_vardecl_2():
+    visitor = serializer.CppSerializerVisitor()
+    variable = cpp_variable('myvar', cpp_type('int', pointer=True))
+    block = cpp_var_declaration(variable)
+
+    variable.parent = cpp_expr('test')
+    
+    result = visitor.parse(block, qualified=True)
+
+    assert result == 'int* test::myvar'
+
+def test_c_cast_1():
+    visitor = serializer.CppSerializerVisitor()
+    ct = cpp_type('int', pointer=True)
+    expr = cpp_expr('a')
+    block = cpp_c_cast(ct, expr)
+    
+    result = visitor.parse(block)
+    
+    assert result == '(int*)(a)'
+
+def test_vararray_decl():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_variable_array_decl(
+                    cpp_variable_array(
+                        cpp_variable('a', 
+                                cpp_type('int', pointer=True)
+                                ),
+                        10)
+                    )
+       
+    result = visitor.parse(block)
+
+    assert result == 'int* a[10]'
+
+def test_cpp_method_call_1():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_call(cpp_method('foo'), cpp_expr(10))
+
+    result = visitor.parse(block)
+
+    assert result == 'foo(10)'
+
+def test_cpp_method_decl():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_method_decl(cpp_method('foo'))
+
+    result = visitor.parse(block)
+
+    assert result == 'void foo()'
+
+def test_cpp_method_decl_1():
+    visitor = serializer.CppSerializerVisitor()
+    block = cpp_method_decl(cpp_method('foo'), qualified=True)
+    block.method.parent = cpp_expr('parent')
+
+    result = visitor.parse(block)
+    assert result == 'void parent::foo()'
+
+def test_cpp_method_def():
+    visitor = serializer.CppSerializerVisitor()
+    method = cpp_method('foo')
+
+    method.append(cpp_expr('a'))
+
+    block = cpp_method_def(method)
+    
+    result = visitor.parse(block)
+
+    assert result == 'void foo(){\n·a;\n}'
+
+def test_cpp_method_def_1():
+    visitor = serializer.CppSerializerVisitor()
+
+    a = cpp_variable('a', cpp_type('int', pointer=True))
+    b = cpp_variable('b', cpp_type('float'))
+
+    method = cpp_method('foo')
+
+    method.append(cpp_var_declaration(a))
+    method.append(cpp_var_declaration(b))
+
+    method.append(cpp_if(cpp_assignment(a,b), 
+                        cpp_call(cpp_expr('printf'), cpp_expr('"Hello, world!\\n"'))
+                    )
+                 )
+
+    block = cpp_method_def(method)    
+    result = visitor.parse(block)
+    assert result == \
+'''void foo(){
+·int* a;
+·float b;
+·if (a·=·b) {
+··printf("Hello, world!\\n");
+·}
+}'''
 
 if __name__ == '__main__':
     g = globals()

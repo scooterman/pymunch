@@ -160,24 +160,6 @@ class cpp_variable(cpp_expr_list):
     def __repr__(self):
         return '<cpp variable: "%s %s" >' % (self.ctype, self.name)
    
-    def declare(self, expr = None):
-        return str(self) + str(expr)
-
-    #shorthand to assign items to this qualtype. Use this if you have to assign
-    #this variable to something as we change it for c++11 items
-    def assign(self, expression, lhs = None):
-        return cpp_assignment('' if lhs == None else lhs, expression)
-
-    def reference(self):
-        return cpp_reference(self)
-
-    def dereference(self):
-        return cpp_indirection(self)
-
-    def define(self):
-        print 'parenteee', self.parent, ('' if not self.parent else self.parent.name + '::') + self.name
-        return self.ctype.define() + ' ' + ('' if not self.parent else self.parent.name + '::') + self.name
-
     #casts this variable to another ctype
     #returns a cast_class object with all convertions made
     def cast(self, cast_class, to_ctype):
@@ -217,75 +199,47 @@ class cpp_variable(cpp_expr_list):
 
         return res_var
 
-    def __str__(self):
-        assert(self.ctype)
-        assert(self.name)
-
-        return ('%s %s %s' % (self.ctype, ('' if not self.parent else self.parent.name + '::') + self.name, '' if self.expr == None else '= %s' % str(self.expr))).strip()
-
-class cpp_static_cast(object):
+@visitable.visitable
+class cpp_static_cast(cpp_expr):
     def __init__(self, ctype_to_cast, expression):
+        cpp_expr.__init__(self, expression)
         self.ctype_to_cast = ctype_to_cast
-        self.expression = expression
 
     def __repr__(self):
-        return '<cpp static cast: "%s %s" >' % (self.ctype_to_cast, self.expression)
+        return '< cpp static cast: "%s %s" >' % (self.ctype_to_cast, self.expr)
 
-    def __str__(self):
-        return 'static_cast<{}>({})'.format(
-                self.ctype_to_cast,
-                self.expression
-            )
-
-class cpp_cast(object):
+@visitable.visitable
+class cpp_c_cast(cpp_expr):
     def __init__(self, ctype_to_cast, expression):
+        cpp_expr.__init__(self, expression)
         self.ctype_to_cast = ctype_to_cast
-        self.expression = expression
 
     def __repr__(self):
-        return '<cpp static cast: "%s %s" >' % (self.ctype_to_cast, self.expression)
+        return '<cpp static cast: "%s %s" >' % (self.ctype_to_cast, self.expr)
 
-    def __str__(self):
-        return '({})({})'.format(
-                self.ctype_to_cast,
-                self.expression
-            )
-
+@visitable.visitable
 class cpp_variable_array(object):
-    def __init__(self, name, ctype, expr = []):
-        self.name = name
-        self.expr = list(expr)
-        self.ctype = ctype
-        self.parent = None
+    def __init__(self, variable, length):
+        self.variable = variable
+        self.length = length
 
     def __repr__(self):
-        return '< cpp variable array: %s[%d] >' % (self.name, len(self.expr))
+        return '< cpp variable array: %s[%d] >' % (self.variable, self.length)
 
-    def define(self):
-        assert(self.ctype)
-        assert(self.name)
+@visitable.visitable
+class cpp_variable_array_decl(object):
+    def __init__(self, array_var):
+        self.array_var = array_var
 
-        return '{} {} {}'.format(self.ctype,
-                                 ('' if not self.parent else self.parent.name + '::') + self.name,
-                                 '' if self.expr == None else '[{}]'.format(len(self.expr)))       
-
-    def __str__(self):
-        assert(self.ctype)
-        assert(self.name)
-
-        return '{} {} {}'.format(self.ctype,
-                                 self.name,
-                                 '' if self.expr == None else '[{}] = {{ {} }}'.format(
-                                            len(self.expr), 
-                                            flatten(self.expr, ','))
-                                )
+    def __repr__(self):
+        return '< cpp variable array decl: %s >' % (self.array_var.variable.name)
 
 @memoize({})
 def cpp_type_internal(*args, **kwargs):
     return cpp_qual_type(*args, **kwargs)
 
-def cpp_type(name, pointer=False, static=False, const=False, reference=False, templates=[], spelling=[]):
-    return cpp_type_internal(name, pointer, static, const, reference, templates, spelling)
+def cpp_type(name, pointer=False, static=False, const=False, reference=False, constexpr=False, templates=[], spelling=[]):
+    return cpp_type_internal(name, pointer, static, const, reference, constexpr, templates, spelling)
 
 @visitable.visitable
 class cpp_qual_type(cpp_expr):
@@ -383,53 +337,33 @@ class cpp_qual_type(cpp_expr):
     def __repr__(self):
         return '< cpp type: %s >' % self.__str__()  
 
-    def __str__(self):
-        assert(self.name)
-
-        result = '%s %s %s%s%s%s' %\
-            ('static' if self.is_static() else '',
-             'const' if self.is_const() else '',
-             str(self.name),
-             '<%s>' % flatten(self.templates, ',') if self.templates else '',
-             '*' if self.is_pointer() else '',
-             '&' if self.is_reference() else '')
-        
-        return result.strip()
-
-class cpp_method_call(object):
-    def __init__(self, expr, params=[]):
-        self.expr = expr
-        self.params = list(params)
+@visitable.visitable
+class cpp_call(cpp_expr):
+    def __init__(self, expr, *params):
+        cpp_expr.__init__(self, expr)
+        self.params = cpp_expr_list(*params)
         self.parent = None
 
     def __repr__(self):
         return '<method call: "%s" (%s) >' % (self.expr, id(self))
 
-    def __str__(self):
-        assert(self.expr)
-        return '%s(%s)' % (str(self.expr),  flatten(self.params, ','))
-
+@visitable.visitable
 class cpp_method(cpp_block):
-    body_str =\
-'''
-{attributes} {static} {return_type} {func_name} ({param_list}) {{
-    {body}
-    {return_value}
-}}'''
-    def __init__(self, name, static = False,
-                 returns = cpp_type('void'), params=[], return_value=None,
-                 is_constructor = False, is_virtual = False, attributes = []):
-        cpp_block.__init__(self)
+    def __init__(self, name,
+                 returns = cpp_type('void'), params=[], 
+                 attributes = [], **kwargs):
+        cpp_block.__init__(self, scoped=True, **kwargs)
         self.name = name
-        self.static = static
         self.returns = returns
-        self.parameters = list(params)
-        self.return_value = return_value
-        self.context = {}
-        self.is_constructor = is_constructor
+        self.parameters = cpp_expr_list(*params)
         self.parent = None
-        self.is_virtual = is_virtual
         self.attributes = list(attributes)
+
+    def is_virtual(self):
+        return 'virtual' in self.attributes
+
+    def is_constructor(self):
+        return 'constructor' in self.attributes
 
     def __repr__(self):
         return '< cpp method: "%s" (%s) >' % (self.name, id(self))
@@ -451,6 +385,26 @@ class cpp_method(cpp_block):
             print 'body:', self.exprs
             traceback.print_exc()
             raise e
+
+
+@visitable.visitable
+class cpp_method_def(object):
+    def __init__(self, method, qualified=False):
+        self.method = method
+        self.qualified = qualified
+
+    def __repr__(self):
+        return '< method definition: %s >' % self.method.name
+
+@visitable.visitable
+class cpp_method_decl(object):
+    def __init__(self, method, qualified=False):
+        self.method = method
+        self.qualified = qualified
+
+    def __repr__(self):
+        return '< method declaration: %s >' % self.method.name
+
 
 class cpp_class(object):
     cpp_class_str=\
