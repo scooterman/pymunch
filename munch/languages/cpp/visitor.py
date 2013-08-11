@@ -31,7 +31,7 @@ class CppVisitor(object):
         self.visit_cpp_expr_list(expr, **kwargs)
 
     def visit_cpp_if(self, expr, ** kwargs):
-        expr.if_exprs.visit(self, **kwargs)        
+        expr.if_exprs.visit(self, **kwargs)
         self.visit_cpp_block(expr, **kwargs)
 
     def visit_cpp_return(self, expr, **kwargs):
